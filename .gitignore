@@ -34,8 +34,8 @@ src-tauri/gen/schemas
 *.local
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+.vscode
+handoff.md
 .idea
 .DS_Store
 *.suo
