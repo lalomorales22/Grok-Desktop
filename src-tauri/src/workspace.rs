@@ -28,7 +28,10 @@ pub struct IndexedWorkspaceItem {
     pub text_content: Option<String>,
 }
 
-pub fn scan_workspace(workspace_id: &str, roots: &[String]) -> AppResult<(WorkspaceScanSummary, Vec<WorkspaceItem>)> {
+pub fn scan_workspace(
+    workspace_id: &str,
+    roots: &[String],
+) -> AppResult<(WorkspaceScanSummary, Vec<WorkspaceItem>)> {
     let mut scanned_files = 0usize;
     let mut indexed_items = Vec::new();
     let mut skipped_files = 0usize;
@@ -154,7 +157,9 @@ pub fn rename_workspace_path(path: &str, new_name: &str) -> AppResult<()> {
         .ok_or_else(|| AppError::message("Unable to rename the selected path."))?;
     let target = parent.join(trimmed);
     if target.exists() {
-        return Err(AppError::message("A file or folder with that name already exists."));
+        return Err(AppError::message(
+            "A file or folder with that name already exists.",
+        ));
     }
 
     fs::rename(current, target)?;
@@ -176,7 +181,11 @@ pub fn delete_workspace_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn to_workspace_item(workspace_id: &str, timestamp: &str, item: IndexedWorkspaceItem) -> WorkspaceItem {
+fn to_workspace_item(
+    workspace_id: &str,
+    timestamp: &str,
+    item: IndexedWorkspaceItem,
+) -> WorkspaceItem {
     WorkspaceItem {
         id: uuid::Uuid::new_v4().to_string(),
         workspace_id: workspace_id.to_string(),
@@ -206,8 +215,13 @@ fn index_candidate(path: &Path) -> AppResult<IndexedWorkspaceItem> {
 
     Ok(IndexedWorkspaceItem {
         path: path.to_string_lossy().to_string(),
-        mime_hint: mime_guess::from_path(path).first_raw().map(ToString::to_string),
-        language_hint: path.extension().and_then(|value| value.to_str()).map(ToString::to_string),
+        mime_hint: mime_guess::from_path(path)
+            .first_raw()
+            .map(ToString::to_string),
+        language_hint: path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(ToString::to_string),
         byte_size: metadata.len(),
         chunk_count,
         text_content,
@@ -259,13 +273,19 @@ mod tests {
         fs::write(dir.path().join("main.rs"), "fn main() {}\n").expect("write rust file");
         fs::write(dir.path().join("image.png"), [0u8, 1u8, 2u8]).expect("write binary");
 
-        let (summary, items) = scan_workspace("workspace-1", &[dir.path().to_string_lossy().to_string()])
-            .expect("scan workspace");
+        let (summary, items) =
+            scan_workspace("workspace-1", &[dir.path().to_string_lossy().to_string()])
+                .expect("scan workspace");
 
         assert_eq!(summary.indexed_items, 2);
         assert_eq!(items.len(), 2);
-        assert!(items.iter().any(|item| item.text_content.as_ref().is_some_and(|value| value.contains("fn main"))));
-        assert!(items.iter().any(|item| item.path.ends_with("image.png") && item.text_content.is_none()));
+        assert!(items.iter().any(|item| item
+            .text_content
+            .as_ref()
+            .is_some_and(|value| value.contains("fn main"))));
+        assert!(items
+            .iter()
+            .any(|item| item.path.ends_with("image.png") && item.text_content.is_none()));
     }
 
     #[test]
@@ -274,8 +294,9 @@ mod tests {
         let file = dir.path().join("empty.ts");
         fs::write(&file, "").expect("write empty file");
 
-        let (summary, items) = scan_workspace("workspace-1", &[dir.path().to_string_lossy().to_string()])
-            .expect("scan workspace");
+        let (summary, items) =
+            scan_workspace("workspace-1", &[dir.path().to_string_lossy().to_string()])
+                .expect("scan workspace");
 
         assert_eq!(summary.indexed_items, 1);
         assert_eq!(items.len(), 1);
@@ -288,8 +309,8 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let file = dir.path().join("notes.md");
         fs::write(&file, "# title\nbody\n").expect("write notes");
-        let (_, items) =
-            scan_workspace("workspace-1", &[file.to_string_lossy().to_string()]).expect("scan file");
+        let (_, items) = scan_workspace("workspace-1", &[file.to_string_lossy().to_string()])
+            .expect("scan file");
 
         let prompt = build_context_prompt(&items).expect("prompt");
         assert!(prompt.contains("<workspace-file"));

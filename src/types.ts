@@ -25,6 +25,11 @@ export interface Settings {
   xaiTtsModel?: string | null;
   xaiRealtimeModel?: string | null;
   xaiVoiceName?: string | null;
+  handsTunnelProvider?: string | null;
+  handsTunnelExecutable?: string | null;
+  handsRelayUrl?: string | null;
+  handsRelayMachineId?: string | null;
+  handsRelayDesktopToken?: string | null;
 }
 
 export interface SettingsPatch {
@@ -37,6 +42,11 @@ export interface SettingsPatch {
   xaiTtsModel?: string;
   xaiRealtimeModel?: string;
   xaiVoiceName?: string;
+  handsTunnelProvider?: string;
+  handsTunnelExecutable?: string;
+  handsRelayUrl?: string;
+  handsRelayMachineId?: string;
+  handsRelayDesktopToken?: string;
 }
 
 export interface Conversation {
@@ -256,6 +266,51 @@ export interface RealtimeSession {
   websocketUrl: string;
   modelId?: string | null;
   voice?: string | null;
+}
+
+export interface HandsConnection {
+  id: string;
+  label: string;
+  connectedAt: string;
+  lastSeenAt: string;
+}
+
+export interface HandsActivityItem {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  createdAt: string;
+  source: string;
+  status: string;
+}
+
+export interface HandsGeneratedAsset {
+  id: string;
+  kind: "image" | "video" | "audio" | string;
+  prompt: string;
+  filePath: string;
+  fileName: string;
+  mimeType?: string | null;
+  createdAt: string;
+  sourceUrl?: string | null;
+  downloadUrl: string;
+}
+
+export interface HandsStatus {
+  state: string;
+  tunnelProvider?: string | null;
+  tunnelExecutable?: string | null;
+  localUrl?: string | null;
+  publicUrl?: string | null;
+  pairingCode?: string | null;
+  workspaceDir: string;
+  tunnelStatus: string;
+  lastError?: string | null;
+  lastActivityAt?: string | null;
+  connections: HandsConnection[];
+  activity: HandsActivityItem[];
+  assets: HandsGeneratedAsset[];
 }
 
 export interface EditorTimelineClip {

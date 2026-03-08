@@ -10,11 +10,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, AppResult};
 use crate::keychain::SecretStore;
+use crate::types::Message;
 use crate::types::{
     GenerateImageRequest, GenerateVideoRequest, MediaAsset, ModelDescriptor, ProviderId,
     RealtimeSession, RealtimeSessionRequest, TextToSpeechRequest, TokenUsage,
 };
-use crate::types::Message;
 
 const XAI_CHAT_ENDPOINT: &str = "https://api.x.ai/v1/chat/completions";
 const XAI_IMAGE_ENDPOINT: &str = "https://api.x.ai/v1/images/generations";
@@ -47,7 +47,10 @@ impl ProviderService {
         self.secrets.delete_api_key(provider)
     }
 
-    pub async fn list_models(&self, _provider: Option<ProviderId>) -> AppResult<Vec<ModelDescriptor>> {
+    pub async fn list_models(
+        &self,
+        _provider: Option<ProviderId>,
+    ) -> AppResult<Vec<ModelDescriptor>> {
         Ok(chat_models())
     }
 
@@ -71,12 +74,17 @@ impl ProviderService {
             "role": "system",
             "content": base_system_prompt(workspace_context),
         })];
-        messages.extend(history.iter().filter(|message| message.role != "system").map(|message| {
-            serde_json::json!({
-                "role": if message.role == "assistant" { "assistant" } else { "user" },
-                "content": message.content,
-            })
-        }));
+        messages.extend(
+            history
+                .iter()
+                .filter(|message| message.role != "system")
+                .map(|message| {
+                    serde_json::json!({
+                        "role": if message.role == "assistant" { "assistant" } else { "user" },
+                        "content": message.content,
+                    })
+                }),
+        );
 
         let mut request_body = serde_json::json!({
             "model": model_id,
@@ -199,7 +207,9 @@ impl ProviderService {
             std::fs::write(&file_path, bytes)?;
             Some(url.to_string())
         } else {
-            return Err(AppError::message("xAI image generation returned no supported image payload"));
+            return Err(AppError::message(
+                "xAI image generation returned no supported image payload",
+            ));
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -252,8 +262,9 @@ impl ProviderService {
             .to_string();
 
         let final_state = self.poll_video_until_ready(&api_key, &request_id).await?;
-        let video_url = find_video_url(&final_state)
-            .ok_or_else(|| AppError::message("xAI video generation completed without a video URL"))?;
+        let video_url = find_video_url(&final_state).ok_or_else(|| {
+            AppError::message("xAI video generation completed without a video URL")
+        })?;
         let file_name = format!("{}.mp4", uuid::Uuid::new_v4());
         let file_path = output_dir.join(file_name);
         let bytes = self.download_bytes(&video_url).await?;
@@ -329,7 +340,10 @@ impl ProviderService {
             id: uuid::Uuid::new_v4().to_string(),
             category_id: request.category_id.clone(),
             kind: "audio".into(),
-            model_id: request.model_id.clone().unwrap_or_else(|| "xai-tts".to_string()),
+            model_id: request
+                .model_id
+                .clone()
+                .unwrap_or_else(|| "xai-tts".to_string()),
             prompt: request.input.clone(),
             file_path: file_path.to_string_lossy().to_string(),
             source_url: None,
@@ -425,7 +439,9 @@ impl ProviderService {
                 _ => tokio::time::sleep(Duration::from_secs(3)).await,
             }
         }
-        Err(AppError::message("Timed out waiting for xAI video generation"))
+        Err(AppError::message(
+            "Timed out waiting for xAI video generation",
+        ))
     }
 
     async fn download_bytes(&self, url: &str) -> AppResult<Vec<u8>> {
@@ -462,7 +478,11 @@ fn chat_models() -> Vec<ModelDescriptor> {
 fn find_video_url(json: &Value) -> Option<String> {
     json.get("video_url")
         .and_then(Value::as_str)
-        .or_else(|| json.get("video").and_then(|value| value.get("url")).and_then(Value::as_str))
+        .or_else(|| {
+            json.get("video")
+                .and_then(|value| value.get("url"))
+                .and_then(Value::as_str)
+        })
         .or_else(|| json.get("url").and_then(Value::as_str))
         .or_else(|| {
             json.get("data")

@@ -1,6 +1,7 @@
 mod db;
 mod editor;
 mod error;
+mod hands;
 mod keychain;
 mod providers;
 mod terminal;
@@ -13,19 +14,23 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 use db::Database;
 use error::AppError;
+use hands::HandsService;
 use keychain::{MigratingSecretStore, SecretStore};
 use providers::ProviderService;
 use tauri::{AppHandle, Emitter, Manager, State};
-use terminal::{ensure_terminal, resize_terminal, terminate_terminal, write_input, TerminalRegistry};
+use terminal::{
+    ensure_terminal, resize_terminal, terminate_terminal, write_input, TerminalRegistry,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use types::{
-    ChatRequest, Conversation, ConversationDetail, ConversationSummary, ExportEditorTimelineRequest,
-    GenerateImageRequest, GenerateVideoRequest, ImportLocalMediaRequest, MediaAsset, MediaCategory,
-    ModelDescriptor, NewConversation, NewMediaCategory, NewWorkspace, ProviderId, ProviderStatus,
-    RealtimeSession, RealtimeSessionRequest, RenameConversation, Settings, SettingsPatch,
-    StreamEvent, StreamHandle, TerminalHandle, TextToSpeechRequest, UpdateMediaAssetRequest,
-    Workspace, WorkspaceItem, WorkspaceMediaFile, WorkspaceScanEvent, WorkspaceScanSummary,
+    ChatRequest, Conversation, ConversationDetail, ConversationSummary,
+    ExportEditorTimelineRequest, GenerateImageRequest, GenerateVideoRequest, HandsStatus,
+    ImportLocalMediaRequest, MediaAsset, MediaCategory, ModelDescriptor, NewConversation,
+    NewMediaCategory, NewWorkspace, ProviderId, ProviderStatus, RealtimeSession,
+    RealtimeSessionRequest, RenameConversation, Settings, SettingsPatch, StreamEvent, StreamHandle,
+    TerminalHandle, TextToSpeechRequest, UpdateMediaAssetRequest, Workspace, WorkspaceItem,
+    WorkspaceMediaFile, WorkspaceScanEvent, WorkspaceScanSummary,
 };
 use window::{apply_always_on_top, configure_window, register_hotkey, WindowState};
 use workspace::{
@@ -39,6 +44,7 @@ struct AppState {
     providers: ProviderService,
     streams: Mutex<std::collections::HashMap<String, CancellationToken>>,
     terminals: TerminalRegistry,
+    hands: HandsService,
 }
 
 #[tauri::command]
@@ -68,7 +74,10 @@ async fn delete_api_key(state: State<'_, AppState>, provider: ProviderId) -> Res
 async fn get_provider_status(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>, String> {
     let mut statuses = Vec::new();
     for provider in [ProviderId::Xai] {
-        let configured = state.providers.has_key(provider).map_err(to_command_error)?;
+        let configured = state
+            .providers
+            .has_key(provider)
+            .map_err(to_command_error)?;
         statuses.push(ProviderStatus {
             provider_id: provider,
             configured,
@@ -94,9 +103,11 @@ async fn list_models(
 #[tauri::command]
 fn read_media_data_url(file_path: String) -> Result<String, String> {
     let media_root = app_storage_dir().join("media");
-    let canonical_root = media_root
-        .canonicalize()
-        .map_err(|error| to_command_error(AppError::message(format!("media root unavailable: {error}"))))?;
+    let canonical_root = media_root.canonicalize().map_err(|error| {
+        to_command_error(AppError::message(format!(
+            "media root unavailable: {error}"
+        )))
+    })?;
     let canonical_path = std::path::PathBuf::from(&file_path)
         .canonicalize()
         .map_err(to_command_error)?;
@@ -135,7 +146,10 @@ fn create_conversation(
     state: State<'_, AppState>,
     input: NewConversation,
 ) -> Result<Conversation, String> {
-    state.db.create_conversation(input).map_err(to_command_error)
+    state
+        .db
+        .create_conversation(input)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -178,10 +192,7 @@ fn set_conversation_pinned(
 }
 
 #[tauri::command]
-fn delete_conversation(
-    state: State<'_, AppState>,
-    conversation_id: String,
-) -> Result<(), String> {
+fn delete_conversation(state: State<'_, AppState>, conversation_id: String) -> Result<(), String> {
     state
         .db
         .delete_conversation(&conversation_id)
@@ -240,7 +251,8 @@ fn scan_workspace_command(
         .get_workspace(&workspace_id)
         .map_err(to_command_error)?
         .ok_or_else(|| "Workspace not found.".to_string())?;
-    let (summary, items) = scan_workspace(&workspace.id, &workspace.roots).map_err(to_command_error)?;
+    let (summary, items) =
+        scan_workspace(&workspace.id, &workspace.roots).map_err(to_command_error)?;
     state
         .db
         .replace_workspace_items(&workspace.id, &items)
@@ -322,7 +334,10 @@ fn create_media_category(
     state: State<'_, AppState>,
     input: NewMediaCategory,
 ) -> Result<MediaCategory, String> {
-    state.db.create_media_category(input).map_err(to_command_error)
+    state
+        .db
+        .create_media_category(input)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -348,7 +363,10 @@ fn import_local_media_command(
     input: ImportLocalMediaRequest,
 ) -> Result<MediaAsset, String> {
     let asset = import_local_media_asset(&app, input).map_err(to_command_error)?;
-    state.db.insert_media_asset(&asset).map_err(to_command_error)?;
+    state
+        .db
+        .insert_media_asset(&asset)
+        .map_err(to_command_error)?;
     Ok(asset)
 }
 
@@ -366,7 +384,10 @@ fn update_media_asset_category(
 
 #[tauri::command]
 fn delete_media_asset(state: State<'_, AppState>, asset_id: String) -> Result<(), String> {
-    state.db.delete_media_asset(&asset_id).map_err(to_command_error)
+    state
+        .db
+        .delete_media_asset(&asset_id)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -380,7 +401,10 @@ async fn generate_image_command(
         .generate_image(&input, &media_output_dir(&app, "images"))
         .await
         .map_err(to_command_error)?;
-    state.db.insert_media_asset(&asset).map_err(to_command_error)?;
+    state
+        .db
+        .insert_media_asset(&asset)
+        .map_err(to_command_error)?;
     Ok(asset)
 }
 
@@ -395,7 +419,10 @@ async fn generate_video_command(
         .generate_video(&input, &media_output_dir(&app, "videos"))
         .await
         .map_err(to_command_error)?;
-    state.db.insert_media_asset(&asset).map_err(to_command_error)?;
+    state
+        .db
+        .insert_media_asset(&asset)
+        .map_err(to_command_error)?;
     Ok(asset)
 }
 
@@ -410,7 +437,10 @@ async fn text_to_speech_command(
         .text_to_speech(&input, &media_output_dir(&app, "audio"))
         .await
         .map_err(to_command_error)?;
-    state.db.insert_media_asset(&asset).map_err(to_command_error)?;
+    state
+        .db
+        .insert_media_asset(&asset)
+        .map_err(to_command_error)?;
     Ok(asset)
 }
 
@@ -423,7 +453,10 @@ async fn export_editor_timeline_command(
     let asset = editor::export_timeline(&input, &media_output_dir(&app, "exports"))
         .await
         .map_err(to_command_error)?;
-    state.db.insert_media_asset(&asset).map_err(to_command_error)?;
+    state
+        .db
+        .insert_media_asset(&asset)
+        .map_err(to_command_error)?;
     Ok(asset)
 }
 
@@ -482,7 +515,10 @@ async fn send_message(
             Some(&input.model_id),
         )
         .map_err(to_command_error)?;
-    let history = state.db.build_chat_history(&input).map_err(to_command_error)?;
+    let history = state
+        .db
+        .build_chat_history(&input)
+        .map_err(to_command_error)?;
 
     let stream_id = uuid::Uuid::new_v4().to_string();
     let handle = StreamHandle {
@@ -637,7 +673,10 @@ fn cancel_stream(state: State<'_, AppState>, stream_id: String) -> Result<(), St
 }
 
 #[tauri::command]
-async fn start_terminal(app: AppHandle, state: State<'_, AppState>) -> Result<TerminalHandle, String> {
+async fn start_terminal(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TerminalHandle, String> {
     ensure_terminal(app, &state.terminals)
         .await
         .map_err(to_command_error)
@@ -673,6 +712,31 @@ async fn resize_terminal_command(
         .map_err(to_command_error)
 }
 
+#[tauri::command]
+async fn get_hands_status(state: State<'_, AppState>) -> Result<HandsStatus, String> {
+    let settings = state.db.load_settings().map_err(to_command_error)?;
+    Ok(state.hands.snapshot(&settings).await)
+}
+
+#[tauri::command]
+async fn start_hands_service(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<HandsStatus, String> {
+    let settings = state.db.load_settings().map_err(to_command_error)?;
+    state
+        .hands
+        .start(app, settings)
+        .await
+        .map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn stop_hands_service(state: State<'_, AppState>) -> Result<HandsStatus, String> {
+    let settings = state.db.load_settings().map_err(to_command_error)?;
+    Ok(state.hands.stop(&settings).await)
+}
+
 fn to_command_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -687,7 +751,10 @@ fn media_output_dir(_app: &AppHandle, bucket: &str) -> std::path::PathBuf {
     app_storage_dir().join("media").join(bucket)
 }
 
-fn collect_workspace_media(roots: &[String], kind_filter: Option<&str>) -> Result<Vec<WorkspaceMediaFile>, AppError> {
+fn collect_workspace_media(
+    roots: &[String],
+    kind_filter: Option<&str>,
+) -> Result<Vec<WorkspaceMediaFile>, AppError> {
     let mut items = Vec::new();
 
     for root in roots {
@@ -707,7 +774,9 @@ fn collect_workspace_media(roots: &[String], kind_filter: Option<&str>) -> Resul
                     .path()
                     .file_name()
                     .and_then(|value| value.to_str())
-                    .map(|name| !matches!(name, ".git" | "node_modules" | "target" | ".next" | "dist"))
+                    .map(|name| {
+                        !matches!(name, ".git" | "node_modules" | "target" | ".next" | "dist")
+                    })
                     .unwrap_or(true)
             })
         {
@@ -741,9 +810,9 @@ fn workspace_media_entry(
         return Ok(None);
     };
     if let Some(filter) = kind_filter {
-      if filter != kind {
-        return Ok(None);
-      }
+        if filter != kind {
+            return Ok(None);
+        }
     }
     let metadata = std::fs::metadata(path)?;
     Ok(Some(WorkspaceMediaFile {
@@ -759,7 +828,10 @@ fn workspace_media_entry(
     }))
 }
 
-fn import_local_media_asset(app: &AppHandle, input: ImportLocalMediaRequest) -> Result<MediaAsset, AppError> {
+fn import_local_media_asset(
+    app: &AppHandle,
+    input: ImportLocalMediaRequest,
+) -> Result<MediaAsset, AppError> {
     let source = std::path::PathBuf::from(&input.file_path);
     if !source.exists() || !source.is_file() {
         return Err(AppError::message("Local media file is missing."));
@@ -800,7 +872,11 @@ fn import_local_media_asset(app: &AppHandle, input: ImportLocalMediaRequest) -> 
             .prompt
             .and_then(|value| {
                 let trimmed = value.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             })
             .unwrap_or_else(|| {
                 source
@@ -893,9 +969,10 @@ pub fn run() {
         .manage(WindowState::default())
         .manage(AppState {
             db: database.clone(),
-            providers,
+            providers: providers.clone(),
             streams: Mutex::new(std::collections::HashMap::new()),
             terminals: Mutex::new(std::collections::HashMap::new()),
+            hands: HandsService::new(database.clone(), providers),
         })
         .setup(move |app| {
             configure_window(app)?;
@@ -924,6 +1001,9 @@ pub fn run() {
             write_terminal_input,
             kill_terminal,
             resize_terminal_command,
+            get_hands_status,
+            start_hands_service,
+            stop_hands_service,
             create_workspace,
             update_workspace,
             list_workspaces,

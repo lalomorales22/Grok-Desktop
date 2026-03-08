@@ -15,7 +15,9 @@ pub async fn export_timeline(
     output_dir: &Path,
 ) -> AppResult<MediaAsset> {
     if request.clips.is_empty() {
-        return Err(AppError::message("Add at least one image, video, or audio clip before exporting."));
+        return Err(AppError::message(
+            "Add at least one image, video, or audio clip before exporting.",
+        ));
     }
 
     std::fs::create_dir_all(output_dir)?;
@@ -40,7 +42,10 @@ async fn export_timeline_inner(
     for (index, clip) in request.clips.iter().enumerate() {
         let source = Path::new(&clip.file_path);
         if !source.exists() {
-            return Err(AppError::message(format!("Clip source is missing: {}", clip.file_path)));
+            return Err(AppError::message(format!(
+                "Clip source is missing: {}",
+                clip.file_path
+            )));
         }
 
         match clip.kind.as_str() {
@@ -131,7 +136,9 @@ async fn export_timeline_inner(
     };
 
     if visual_timeline.is_none() && audio_timeline.is_none() {
-        return Err(AppError::message("Nothing was available to export from the editor timeline."));
+        return Err(AppError::message(
+            "Nothing was available to export from the editor timeline.",
+        ));
     }
 
     let title = request
@@ -183,7 +190,10 @@ async fn export_timeline_inner(
                     "-f".into(),
                     "lavfi".into(),
                     "-i".into(),
-                    format!("color=c=black:s={}x{}:r={}", EXPORT_WIDTH, EXPORT_HEIGHT, EXPORT_FPS),
+                    format!(
+                        "color=c=black:s={}x{}:r={}",
+                        EXPORT_WIDTH, EXPORT_HEIGHT, EXPORT_FPS
+                    ),
                     "-i".into(),
                     audio.to_string_lossy().to_string(),
                     "-c:v".into(),
@@ -223,10 +233,16 @@ async fn export_timeline_inner(
     })
 }
 
-async fn build_image_segment(ffmpeg: &Path, clip: &EditorTimelineClip, output: &Path) -> AppResult<()> {
+async fn build_image_segment(
+    ffmpeg: &Path,
+    clip: &EditorTimelineClip,
+    output: &Path,
+) -> AppResult<()> {
     let duration = clip.still_duration.unwrap_or(3.0);
     if duration <= 0.0 {
-        return Err(AppError::message("Image clip duration must be greater than zero."));
+        return Err(AppError::message(
+            "Image clip duration must be greater than zero.",
+        ));
     }
 
     run_ffmpeg(
@@ -254,7 +270,11 @@ async fn build_image_segment(ffmpeg: &Path, clip: &EditorTimelineClip, output: &
     .await
 }
 
-async fn build_video_segment(ffmpeg: &Path, clip: &EditorTimelineClip, output: &Path) -> AppResult<()> {
+async fn build_video_segment(
+    ffmpeg: &Path,
+    clip: &EditorTimelineClip,
+    output: &Path,
+) -> AppResult<()> {
     let mut args = vec!["-y".into()];
     append_time_window(&mut args, clip)?;
     args.extend([
@@ -274,7 +294,11 @@ async fn build_video_segment(ffmpeg: &Path, clip: &EditorTimelineClip, output: &
     run_ffmpeg(ffmpeg, &args).await
 }
 
-async fn build_audio_segment(ffmpeg: &Path, clip: &EditorTimelineClip, output: &Path) -> AppResult<()> {
+async fn build_audio_segment(
+    ffmpeg: &Path,
+    clip: &EditorTimelineClip,
+    output: &Path,
+) -> AppResult<()> {
     let mut args = vec!["-y".into()];
     append_time_window(&mut args, clip)?;
     args.extend([
@@ -306,7 +330,9 @@ fn append_time_window(args: &mut Vec<String>, clip: &EditorTimelineClip) -> AppR
     }
     if clip.trim_end.is_some() {
         if end <= start {
-            return Err(AppError::message("Trim end must be greater than trim start."));
+            return Err(AppError::message(
+                "Trim end must be greater than trim start.",
+            ));
         }
         args.push("-t".into());
         args.push(format_seconds(end - start));

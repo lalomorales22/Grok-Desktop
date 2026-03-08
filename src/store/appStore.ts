@@ -9,6 +9,7 @@ import type {
   MediaCategory,
   ModelDescriptor,
   ExportEditorTimelineRequest,
+  HandsStatus,
   ProviderId,
   ProviderStatus,
   RealtimeSession,
@@ -61,6 +62,8 @@ interface AppState {
   mediaCategories: MediaCategory[];
   mediaAssets: MediaAsset[];
   selectedMediaCategoryId?: string;
+  handsStatus?: HandsStatus;
+  handsBusy: boolean;
   realtimeSession?: RealtimeSession;
   initialize: () => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -68,6 +71,9 @@ interface AppState {
   refreshModels: () => Promise<void>;
   refreshMediaCategories: () => Promise<void>;
   refreshMediaAssets: (categoryId?: string) => Promise<void>;
+  refreshHandsStatus: () => Promise<void>;
+  startHandsService: () => Promise<void>;
+  stopHandsService: () => Promise<void>;
   startTerminal: () => Promise<void>;
   selectModel: (modelId: string) => void;
   setComposer: (value: string) => void;
@@ -132,6 +138,11 @@ const fallbackSettings: Settings = {
   xaiTtsModel: "xai-tts",
   xaiRealtimeModel: "grok-realtime",
   xaiVoiceName: "eve",
+  handsTunnelProvider: "relay",
+  handsTunnelExecutable: "",
+  handsRelayUrl: "http://127.0.0.1:8787",
+  handsRelayMachineId: "",
+  handsRelayDesktopToken: "",
 };
 
 function pickModel(models: ModelMap) {
@@ -189,6 +200,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   browserDraftUrl: "http://localhost:3000",
   mediaCategories: [],
   mediaAssets: [],
+  handsBusy: false,
 
   initialize: async () => {
     try {
@@ -294,6 +306,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         });
 
         await events.onError((event) => set({ error: event.message }));
+        await events.onHands((handsStatus) => set({ handsStatus, handsBusy: false }));
         set({ listenersReady: true });
       }
 
@@ -304,6 +317,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         workspacesResult,
         categoriesResult,
         assetsResult,
+        handsResult,
       ] = await Promise.allSettled([
         api.getSettings(),
         api.getProviderStatus(),
@@ -311,6 +325,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         api.listWorkspaces(),
         api.listMediaCategories(),
         api.listMediaAssets(),
+        api.getHandsStatus(),
       ]);
 
       const settings = settingsResult.status === "fulfilled" ? settingsResult.value : fallbackSettings;
@@ -319,6 +334,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const workspaces = workspacesResult.status === "fulfilled" ? workspacesResult.value : [];
       const mediaCategories = categoriesResult.status === "fulfilled" ? categoriesResult.value : [];
       const mediaAssets = assetsResult.status === "fulfilled" ? assetsResult.value : [];
+      const handsStatus = handsResult.status === "fulfilled" ? handsResult.value : undefined;
 
       set({
         settings,
@@ -327,6 +343,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         workspaces,
         mediaCategories,
         mediaAssets,
+        handsStatus,
         selectedProvider: "xai",
         selectedModel: settings.xaiModel ?? fallbackSettings.xaiModel ?? "grok-code-fast-1",
         initialized: true,
@@ -379,6 +396,37 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshMediaAssets: async (categoryId) => {
     const mediaAssets = await api.listMediaAssets(categoryId);
     set({ mediaAssets, selectedMediaCategoryId: categoryId });
+  },
+
+  refreshHandsStatus: async () => {
+    const handsStatus = await api.getHandsStatus();
+    set({ handsStatus });
+  },
+
+  startHandsService: async () => {
+    set({ handsBusy: true, error: undefined });
+    try {
+      const handsStatus = await api.startHandsService();
+      set({ handsStatus, handsBusy: false });
+    } catch (error) {
+      set({
+        handsBusy: false,
+        error: error instanceof Error ? error.message : "Failed to start Hands.",
+      });
+    }
+  },
+
+  stopHandsService: async () => {
+    set({ handsBusy: true, error: undefined });
+    try {
+      const handsStatus = await api.stopHandsService();
+      set({ handsStatus, handsBusy: false });
+    } catch (error) {
+      set({
+        handsBusy: false,
+        error: error instanceof Error ? error.message : "Failed to stop Hands.",
+      });
+    }
   },
 
   startTerminal: async () => {
@@ -498,6 +546,27 @@ export const useAppStore = create<AppState>((set, get) => ({
       xaiRealtimeModel:
         next.xaiRealtimeModel ?? current.xaiRealtimeModel ?? fallbackSettings.xaiRealtimeModel ?? "",
       xaiVoiceName: next.xaiVoiceName ?? current.xaiVoiceName ?? fallbackSettings.xaiVoiceName ?? "",
+      handsTunnelProvider:
+        next.handsTunnelProvider ??
+        current.handsTunnelProvider ??
+        fallbackSettings.handsTunnelProvider ??
+        "relay",
+      handsTunnelExecutable:
+        next.handsTunnelExecutable ??
+        current.handsTunnelExecutable ??
+        fallbackSettings.handsTunnelExecutable ??
+        "",
+      handsRelayUrl: next.handsRelayUrl ?? current.handsRelayUrl ?? fallbackSettings.handsRelayUrl ?? "",
+      handsRelayMachineId:
+        next.handsRelayMachineId ??
+        current.handsRelayMachineId ??
+        fallbackSettings.handsRelayMachineId ??
+        "",
+      handsRelayDesktopToken:
+        next.handsRelayDesktopToken ??
+        current.handsRelayDesktopToken ??
+        fallbackSettings.handsRelayDesktopToken ??
+        "",
     });
 
     set({

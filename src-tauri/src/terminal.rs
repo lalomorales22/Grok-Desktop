@@ -18,7 +18,10 @@ pub struct TerminalSession {
 
 pub type TerminalRegistry = Mutex<HashMap<String, Arc<TerminalSession>>>;
 
-pub async fn ensure_terminal(app: AppHandle, registry: &TerminalRegistry) -> AppResult<TerminalHandle> {
+pub async fn ensure_terminal(
+    app: AppHandle,
+    registry: &TerminalRegistry,
+) -> AppResult<TerminalHandle> {
     if let Some(existing) = registry
         .lock()
         .map_err(|_| AppError::message("terminal registry lock poisoned"))?

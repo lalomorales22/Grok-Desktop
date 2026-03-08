@@ -8,6 +8,7 @@ import type {
   ExportEditorTimelineRequest,
   GenerateImageRequest,
   GenerateVideoRequest,
+  HandsStatus,
   ImportLocalMediaRequest,
   MediaAsset,
   MediaCategory,
@@ -42,6 +43,9 @@ export const api = {
   deleteApiKey: (provider: ProviderId) =>
     invoke<void>("delete_api_key", { provider }),
   getProviderStatus: () => invoke<ProviderStatus[]>("get_provider_status"),
+  getHandsStatus: () => invoke<HandsStatus>("get_hands_status"),
+  startHandsService: () => invoke<HandsStatus>("start_hands_service"),
+  stopHandsService: () => invoke<HandsStatus>("stop_hands_service"),
   listModels: (provider?: ProviderId) =>
     invoke<ModelDescriptor[]>("list_models", { provider }),
   readMediaDataUrl: (filePath: string) =>
@@ -126,4 +130,6 @@ export const events = {
     listen<TerminalEvent>("terminal://event", ({ payload }) => handler(payload)),
   onError: (handler: (event: UiErrorEvent) => void) =>
     listen<UiErrorEvent>("app://error", ({ payload }) => handler(payload)),
+  onHands: (handler: (event: HandsStatus) => void) =>
+    listen<HandsStatus>("hands://status", ({ payload }) => handler(payload)),
 };

@@ -87,6 +87,11 @@ pub struct Settings {
     pub xai_tts_model: Option<String>,
     pub xai_realtime_model: Option<String>,
     pub xai_voice_name: Option<String>,
+    pub hands_tunnel_provider: Option<String>,
+    pub hands_tunnel_executable: Option<String>,
+    pub hands_relay_url: Option<String>,
+    pub hands_relay_machine_id: Option<String>,
+    pub hands_relay_desktop_token: Option<String>,
 }
 
 impl Default for Settings {
@@ -101,6 +106,11 @@ impl Default for Settings {
             xai_tts_model: Some("xai-tts".into()),
             xai_realtime_model: Some("grok-realtime".into()),
             xai_voice_name: Some("eve".into()),
+            hands_tunnel_provider: Some("relay".into()),
+            hands_tunnel_executable: None,
+            hands_relay_url: Some("http://127.0.0.1:8787".into()),
+            hands_relay_machine_id: None,
+            hands_relay_desktop_token: None,
         }
     }
 }
@@ -117,6 +127,11 @@ pub struct SettingsPatch {
     pub xai_tts_model: Option<String>,
     pub xai_realtime_model: Option<String>,
     pub xai_voice_name: Option<String>,
+    pub hands_tunnel_provider: Option<String>,
+    pub hands_tunnel_executable: Option<String>,
+    pub hands_relay_url: Option<String>,
+    pub hands_relay_machine_id: Option<String>,
+    pub hands_relay_desktop_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,4 +431,57 @@ pub struct RealtimeSession {
     pub websocket_url: String,
     pub model_id: Option<String>,
     pub voice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandsConnection {
+    pub id: String,
+    pub label: String,
+    pub connected_at: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandsActivityItem {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub created_at: String,
+    pub source: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandsGeneratedAsset {
+    pub id: String,
+    pub kind: String,
+    pub prompt: String,
+    pub file_path: String,
+    pub file_name: String,
+    pub mime_type: Option<String>,
+    pub created_at: String,
+    pub source_url: Option<String>,
+    pub download_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandsStatus {
+    pub state: String,
+    pub tunnel_provider: Option<String>,
+    pub tunnel_executable: Option<String>,
+    pub local_url: Option<String>,
+    pub public_url: Option<String>,
+    pub pairing_code: Option<String>,
+    pub workspace_dir: String,
+    pub tunnel_status: String,
+    pub last_error: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub connections: Vec<HandsConnection>,
+    pub activity: Vec<HandsActivityItem>,
+    pub assets: Vec<HandsGeneratedAsset>,
 }

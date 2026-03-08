@@ -139,7 +139,11 @@ fn parse_shortcut(value: &str) -> AppResult<Shortcut> {
             "x" => code = Some(Code::KeyX),
             "y" => code = Some(Code::KeyY),
             "z" => code = Some(Code::KeyZ),
-            other => return Err(AppError::message(format!("Unsupported hotkey token: {other}"))),
+            other => {
+                return Err(AppError::message(format!(
+                    "Unsupported hotkey token: {other}"
+                )))
+            }
         }
     }
     let code = code.ok_or_else(|| AppError::message("Hotkey is missing a key"))?;

@@ -245,7 +245,9 @@ mod tests {
 
     use crate::types::ProviderId;
 
-    use super::{testsupport::MemorySecretStore, FileSecretStore, MigratingSecretStore, SecretStore};
+    use super::{
+        testsupport::MemorySecretStore, FileSecretStore, MigratingSecretStore, SecretStore,
+    };
 
     #[test]
     fn migrates_plaintext_secret_into_primary_store() {

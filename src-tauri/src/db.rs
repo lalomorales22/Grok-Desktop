@@ -5,10 +5,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::AppResult;
 use crate::types::{
-    ChatRequest, Conversation, ConversationDetail, ConversationSummary, MediaAsset,
-    MediaCategory, Message, MessageRole, NewConversation, NewMediaCategory, NewWorkspace,
-    ProviderId, Settings, SettingsPatch, TokenUsage, UpdateMediaAssetRequest, Workspace,
-    WorkspaceItem,
+    ChatRequest, Conversation, ConversationDetail, ConversationSummary, MediaAsset, MediaCategory,
+    Message, MessageRole, NewConversation, NewMediaCategory, NewWorkspace, ProviderId, Settings,
+    SettingsPatch, TokenUsage, UpdateMediaAssetRequest, Workspace, WorkspaceItem,
 };
 
 #[derive(Debug, Clone)]
@@ -97,7 +96,12 @@ impl Database {
               xai_video_model TEXT,
               xai_tts_model TEXT,
               xai_realtime_model TEXT,
-              xai_voice_name TEXT
+              xai_voice_name TEXT,
+              hands_tunnel_provider TEXT,
+              hands_tunnel_executable TEXT,
+              hands_relay_url TEXT,
+              hands_relay_machine_id TEXT,
+              hands_relay_desktop_token TEXT
             );
             CREATE TABLE IF NOT EXISTS media_categories (
               id TEXT PRIMARY KEY,
@@ -128,13 +132,23 @@ impl Database {
         ensure_column(&conn, "settings", "xai_tts_model", "TEXT")?;
         ensure_column(&conn, "settings", "xai_realtime_model", "TEXT")?;
         ensure_column(&conn, "settings", "xai_voice_name", "TEXT")?;
-        ensure_column(&conn, "conversations", "pinned", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "settings", "hands_tunnel_provider", "TEXT")?;
+        ensure_column(&conn, "settings", "hands_tunnel_executable", "TEXT")?;
+        ensure_column(&conn, "settings", "hands_relay_url", "TEXT")?;
+        ensure_column(&conn, "settings", "hands_relay_machine_id", "TEXT")?;
+        ensure_column(&conn, "settings", "hands_relay_desktop_token", "TEXT")?;
+        ensure_column(
+            &conn,
+            "conversations",
+            "pinned",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         let defaults = Settings::default();
         conn.execute(
             r#"
             INSERT INTO settings
-              (id, hotkey, always_on_top, default_provider, xai_model, xai_image_model, xai_video_model, xai_tts_model, xai_realtime_model, xai_voice_name)
-            VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              (id, hotkey, always_on_top, default_provider, xai_model, xai_image_model, xai_video_model, xai_tts_model, xai_realtime_model, xai_voice_name, hands_tunnel_provider, hands_tunnel_executable, hands_relay_url, hands_relay_machine_id, hands_relay_desktop_token)
+            VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(id) DO NOTHING
             "#,
             params![
@@ -146,7 +160,12 @@ impl Database {
                 defaults.xai_video_model,
                 defaults.xai_tts_model,
                 defaults.xai_realtime_model,
-                defaults.xai_voice_name
+                defaults.xai_voice_name,
+                defaults.hands_tunnel_provider,
+                defaults.hands_tunnel_executable,
+                defaults.hands_relay_url,
+                defaults.hands_relay_machine_id,
+                defaults.hands_relay_desktop_token
             ],
         )?;
         Ok(())
@@ -155,7 +174,7 @@ impl Database {
     pub fn load_settings(&self) -> AppResult<Settings> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
-            "SELECT hotkey, always_on_top, default_provider, xai_model, xai_image_model, xai_video_model, xai_tts_model, xai_realtime_model, xai_voice_name FROM settings WHERE id = 1",
+            "SELECT hotkey, always_on_top, default_provider, xai_model, xai_image_model, xai_video_model, xai_tts_model, xai_realtime_model, xai_voice_name, hands_tunnel_provider, hands_tunnel_executable, hands_relay_url, hands_relay_machine_id, hands_relay_desktop_token FROM settings WHERE id = 1",
         )?;
         let settings = statement.query_row([], |row| {
             Ok(Settings {
@@ -168,6 +187,11 @@ impl Database {
                 xai_tts_model: row.get(6)?,
                 xai_realtime_model: row.get(7)?,
                 xai_voice_name: row.get(8)?,
+                hands_tunnel_provider: row.get(9)?,
+                hands_tunnel_executable: row.get(10)?,
+                hands_relay_url: row.get(11)?,
+                hands_relay_machine_id: row.get(12)?,
+                hands_relay_desktop_token: row.get(13)?,
             })
         })?;
         Ok(settings)
@@ -202,9 +226,27 @@ impl Database {
         if let Some(xai_voice_name) = patch.xai_voice_name {
             current.xai_voice_name = normalize_optional_text(Some(xai_voice_name));
         }
+        if let Some(hands_tunnel_provider) = patch.hands_tunnel_provider {
+            current.hands_tunnel_provider = normalize_optional_text(Some(hands_tunnel_provider));
+        }
+        if let Some(hands_tunnel_executable) = patch.hands_tunnel_executable {
+            current.hands_tunnel_executable =
+                normalize_optional_text(Some(hands_tunnel_executable));
+        }
+        if let Some(hands_relay_url) = patch.hands_relay_url {
+            current.hands_relay_url = normalize_optional_text(Some(hands_relay_url));
+        }
+        if let Some(hands_relay_machine_id) = patch.hands_relay_machine_id {
+            current.hands_relay_machine_id =
+                normalize_optional_text(Some(hands_relay_machine_id));
+        }
+        if let Some(hands_relay_desktop_token) = patch.hands_relay_desktop_token {
+            current.hands_relay_desktop_token =
+                normalize_optional_text(Some(hands_relay_desktop_token));
+        }
         let conn = self.connect()?;
         conn.execute(
-            "UPDATE settings SET hotkey = ?1, always_on_top = ?2, default_provider = ?3, xai_model = ?4, xai_image_model = ?5, xai_video_model = ?6, xai_tts_model = ?7, xai_realtime_model = ?8, xai_voice_name = ?9 WHERE id = 1",
+            "UPDATE settings SET hotkey = ?1, always_on_top = ?2, default_provider = ?3, xai_model = ?4, xai_image_model = ?5, xai_video_model = ?6, xai_tts_model = ?7, xai_realtime_model = ?8, xai_voice_name = ?9, hands_tunnel_provider = ?10, hands_tunnel_executable = ?11, hands_relay_url = ?12, hands_relay_machine_id = ?13, hands_relay_desktop_token = ?14 WHERE id = 1",
             params![
                 current.hotkey,
                 current.always_on_top as i64,
@@ -214,7 +256,12 @@ impl Database {
                 current.xai_video_model,
                 current.xai_tts_model,
                 current.xai_realtime_model,
-                current.xai_voice_name
+                current.xai_voice_name,
+                current.hands_tunnel_provider,
+                current.hands_tunnel_executable,
+                current.hands_relay_url,
+                current.hands_relay_machine_id,
+                current.hands_relay_desktop_token
             ],
         )?;
         Ok(current)
@@ -421,7 +468,12 @@ impl Database {
         Ok(message)
     }
 
-    pub fn append_message_part(&self, message_id: &str, part_index: usize, content: &str) -> AppResult<()> {
+    pub fn append_message_part(
+        &self,
+        message_id: &str,
+        part_index: usize,
+        content: &str,
+    ) -> AppResult<()> {
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO message_parts (message_id, part_index, content, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -443,11 +495,12 @@ impl Database {
         error: Option<String>,
     ) -> AppResult<()> {
         let conn = self.connect()?;
-        let (conversation_id, provider_id, model_id): (String, Option<String>, Option<String>) = conn.query_row(
-            "SELECT conversation_id, provider_id, model_id FROM messages WHERE id = ?1",
-            [message_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        let (conversation_id, provider_id, model_id): (String, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT conversation_id, provider_id, model_id FROM messages WHERE id = ?1",
+                [message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
         conn.execute(
             "UPDATE messages SET content = ?2, status = ?3, updated_at = ?4, error = ?5, input_tokens = ?6, output_tokens = ?7 WHERE id = ?1",
             params![
@@ -470,7 +523,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_message_context(&self, message_id: &str, workspace_item_ids: &[String]) -> AppResult<()> {
+    pub fn save_message_context(
+        &self,
+        message_id: &str,
+        workspace_item_ids: &[String],
+    ) -> AppResult<()> {
         let conn = self.connect()?;
         for workspace_item_id in workspace_item_ids {
             conn.execute(
@@ -560,7 +617,11 @@ impl Database {
         Ok(workspace)
     }
 
-    pub fn update_workspace(&self, workspace_id: &str, input: NewWorkspace) -> AppResult<Workspace> {
+    pub fn update_workspace(
+        &self,
+        workspace_id: &str,
+        input: NewWorkspace,
+    ) -> AppResult<Workspace> {
         let conn = self.connect()?;
         let current = self
             .get_workspace(workspace_id)?
@@ -574,7 +635,10 @@ impl Database {
             "UPDATE workspaces SET name = ?2, roots_json = ?3, last_scanned_at = NULL WHERE id = ?1",
             params![workspace_id, name, serde_json::to_string(&input.roots)?],
         )?;
-        conn.execute("DELETE FROM workspace_items WHERE workspace_id = ?1", [workspace_id])?;
+        conn.execute(
+            "DELETE FROM workspace_items WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
         Ok(Workspace {
             id: current.id,
             name,
@@ -591,10 +655,17 @@ impl Database {
         Ok(())
     }
 
-    pub fn replace_workspace_items(&self, workspace_id: &str, items: &[WorkspaceItem]) -> AppResult<()> {
+    pub fn replace_workspace_items(
+        &self,
+        workspace_id: &str,
+        items: &[WorkspaceItem],
+    ) -> AppResult<()> {
         let mut conn = self.connect()?;
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM workspace_items WHERE workspace_id = ?1", [workspace_id])?;
+        tx.execute(
+            "DELETE FROM workspace_items WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
         for item in items {
             tx.execute(
                 r#"
@@ -632,12 +703,17 @@ impl Database {
             return Ok(Vec::new());
         }
         let conn = self.connect()?;
-        let placeholders = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(", ");
+        let placeholders = std::iter::repeat("?")
+            .take(ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
         let query = format!(
             "SELECT id, workspace_id, path, mime_hint, language_hint, byte_size, chunk_count, last_indexed_at, text_content FROM workspace_items WHERE id IN ({placeholders})"
         );
         let mut statement = conn.prepare(&query)?;
-        let rows = statement.query_map(rusqlite::params_from_iter(ids.iter()), |row| map_workspace_item(row, true))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            map_workspace_item(row, true)
+        })?;
         Ok(rows.filter_map(Result::ok).collect())
     }
 
@@ -800,7 +876,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn refresh_workspace_item_content_by_path(&self, file_path: &str, content: &str) -> AppResult<()> {
+    pub fn refresh_workspace_item_content_by_path(
+        &self,
+        file_path: &str,
+        content: &str,
+    ) -> AppResult<()> {
         let conn = self.connect()?;
         let metadata = std::fs::metadata(file_path)?;
         conn.execute(
@@ -822,12 +902,18 @@ impl Database {
         Ok(conn)
     }
 
-    fn fetch_workspace_items(&self, workspace_id: &str, include_content: bool) -> AppResult<Vec<WorkspaceItem>> {
+    fn fetch_workspace_items(
+        &self,
+        workspace_id: &str,
+        include_content: bool,
+    ) -> AppResult<Vec<WorkspaceItem>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
             "SELECT id, workspace_id, path, mime_hint, language_hint, byte_size, chunk_count, last_indexed_at, text_content FROM workspace_items WHERE workspace_id = ?1 ORDER BY path ASC",
         )?;
-        let rows = statement.query_map([workspace_id], |row| map_workspace_item(row, include_content))?;
+        let rows = statement.query_map([workspace_id], |row| {
+            map_workspace_item(row, include_content)
+        })?;
         Ok(rows.filter_map(Result::ok).collect())
     }
 
@@ -853,7 +939,10 @@ impl Database {
     }
 }
 
-fn map_workspace_item(row: &rusqlite::Row<'_>, include_content: bool) -> rusqlite::Result<WorkspaceItem> {
+fn map_workspace_item(
+    row: &rusqlite::Row<'_>,
+    include_content: bool,
+) -> rusqlite::Result<WorkspaceItem> {
     Ok(WorkspaceItem {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
@@ -918,7 +1007,8 @@ fn trim_preview(value: &str) -> String {
 }
 
 fn infer_workspace_name(roots: &[String]) -> String {
-    roots.first()
+    roots
+        .first()
         .and_then(|root| Path::new(root).file_name())
         .and_then(|value| value.to_str())
         .map(ToString::to_string)
@@ -926,7 +1016,9 @@ fn infer_workspace_name(roots: &[String]) -> String {
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
-    value.map(|item| item.trim().to_string()).filter(|item| !item.is_empty())
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> AppResult<()> {
