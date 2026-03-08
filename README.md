@@ -70,6 +70,13 @@ The repository now includes a Render Blueprint at [`render.yaml`](/Users/megabra
 
 The fastest production path is Render.
 
+If you plan to share Grok Desktop with other users, each user should either:
+
+- deploy their own `Hands Relay` service, or
+- use a relay service you operate for them
+
+The app does not magically create a public HTTPS endpoint from a local machine by itself. Off-site `Hands` access requires a public relay origin.
+
 Before you deploy:
 
 1. Commit and push the latest repository state to GitHub.
@@ -96,6 +103,29 @@ https://hands-relay.onrender.com
 11. Set `Hands Relay URL` to the Render HTTPS URL.
 12. Click `Start secure link`.
 13. Wait for the QR code and mobile URL to refresh.
+
+## Relay Setup For Other Users
+
+If someone else installs Grok Desktop and wants `Hands` remote access, they need to configure a public relay too.
+
+Per-user setup flow:
+
+1. Fork or clone this repository.
+2. Deploy `hands-relay` to Render or another public HTTPS host.
+3. Copy the deployed relay URL.
+4. In Grok Desktop, open `Hands`.
+5. Set `Provider` to `Hands Relay`.
+6. Paste the deployed relay URL into `Hands Relay URL`.
+7. Click `Start secure link`.
+8. Scan the QR code from the phone and finish pairing with the one-time code.
+
+If you operate a shared relay for multiple users:
+
+- they can all point `Hands Relay URL` at the same deployed relay origin
+- each desktop app generates its own machine identity and pairing flow
+- each phone still pairs against a specific machine session
+
+That means one public relay service can support multiple Grok Desktop users, but every user still has to configure the app to point at that relay.
 
 Optional production hardening:
 

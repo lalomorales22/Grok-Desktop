@@ -8,7 +8,6 @@ services:
     buildCommand: npm install
     startCommand: npm run start
     healthCheckPath: /health
-    autoDeploy: true
     buildFilter:
       paths:
         - hands-relay/**
