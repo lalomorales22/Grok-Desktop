@@ -1,4 +1,5 @@
 # Grok Desktop
+<img width="2094" height="1140" alt="Screenshot 2026-03-08 at 11 58 17 AM" src="https://github.com/user-attachments/assets/88e3c94d-8acf-4736-b03b-8893e9facbd2" />
 
 Grok Desktop is a macOS Tauri app for xAI with chat, workspace-aware tools, browser preview, a local terminal, media generation, a first-pass media editor, and an in-app IDE surface.
 
