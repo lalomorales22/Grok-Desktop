@@ -127,6 +127,11 @@ If you operate a shared relay for multiple users:
 
 That means one public relay service can support multiple Grok Desktop users, but every user still has to configure the app to point at that relay.
 
+Update behavior:
+
+- changes to the mobile `Hands` web experience inside `hands-relay/` require a relay redeploy
+- changes to the desktop app itself require rebuilding or reinstalling Grok Desktop
+
 Optional production hardening:
 
 - Attach a custom domain in Render later if you want your own hostname.

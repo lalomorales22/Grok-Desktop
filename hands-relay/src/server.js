@@ -198,13 +198,15 @@ function mobileHtml(machineId) {
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0a0d0f;
-        --panel: rgba(20, 26, 28, 0.92);
-        --muted: #8da39e;
+        --bg: #040506;
+        --panel: rgba(11, 13, 15, 0.96);
+        --muted: #7d928d;
         --text: #f4f7f5;
-        --accent: #7fe7b5;
+        --accent: #89f0bb;
+        --accent-strong: #5dd497;
         --line: rgba(255,255,255,0.08);
         --warn: #fbbf24;
+        --error: #fb7185;
       }
       * { box-sizing: border-box; }
       body {
@@ -212,8 +214,9 @@ function mobileHtml(machineId) {
         min-height: 100vh;
         font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
         background:
-          radial-gradient(circle at top, rgba(127,231,181,0.16), transparent 42%),
-          linear-gradient(180deg, #101717 0%, #090c0e 76%);
+          radial-gradient(circle at top, rgba(93,212,151,0.16), transparent 38%),
+          radial-gradient(circle at bottom, rgba(30,41,59,0.18), transparent 42%),
+          linear-gradient(180deg, #090b0d 0%, #030405 76%);
         color: var(--text);
       }
       main { padding: 18px 16px 32px; max-width: 760px; margin: 0 auto; display: grid; gap: 14px; }
@@ -222,7 +225,8 @@ function mobileHtml(machineId) {
         border: 1px solid var(--line);
         border-radius: 22px;
         padding: 16px;
-        backdrop-filter: blur(18px);
+        backdrop-filter: blur(20px);
+        box-shadow: 0 18px 70px rgba(0,0,0,0.28);
       }
       .eyebrow { font-size: 11px; letter-spacing: 0.24em; text-transform: uppercase; color: var(--muted); }
       h1, h2, p { margin: 0; }
@@ -230,31 +234,46 @@ function mobileHtml(machineId) {
         width: 100%;
         border-radius: 14px;
         border: 1px solid var(--line);
-        background: rgba(255,255,255,0.04);
+        background: rgba(255,255,255,0.035);
         color: var(--text);
         padding: 12px 14px;
         font: inherit;
       }
       textarea { min-height: 110px; resize: vertical; }
       button {
-        background: linear-gradient(180deg, rgba(127,231,181,0.24), rgba(87,180,140,0.18));
-        border-color: rgba(127,231,181,0.26);
+        background: linear-gradient(180deg, rgba(93,212,151,0.26), rgba(64,150,111,0.18));
+        border-color: rgba(93,212,151,0.3);
         font-weight: 600;
       }
       .secondary { background: rgba(255,255,255,0.04); border-color: var(--line); }
       .stack { display: grid; gap: 12px; }
       .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
       .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-      .chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; font-size: 12px; color: #d7e6df; }
-      .item { border: 1px solid var(--line); border-radius: 16px; padding: 12px; background: rgba(255,255,255,0.03); }
+      .chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; font-size: 12px; color: #d7e6df; background: rgba(255,255,255,0.02); }
+      .item { border: 1px solid var(--line); border-radius: 16px; padding: 12px; background: rgba(255,255,255,0.025); }
       .item small { display: block; margin-bottom: 6px; color: var(--muted); }
       .hidden { display: none !important; }
       .warning { color: var(--warn); }
+      .error { color: var(--error); }
+      .hero {
+        padding: 18px;
+        border-radius: 24px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background:
+          radial-gradient(circle at top left, rgba(93,212,151,0.18), transparent 34%),
+          linear-gradient(180deg, rgba(12,15,17,0.98), rgba(6,7,8,0.98));
+      }
+      .status-card {
+        border-radius: 18px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.025);
+        padding: 12px;
+      }
     </style>
   </head>
   <body>
     <main>
-      <section class="stack">
+      <section class="hero stack">
         <div class="eyebrow">Hands Relay</div>
         <h1 style="font-size:28px;line-height:1;">Remote Grok Desktop</h1>
         <p style="font-size:14px;line-height:1.5;color:#d4dfda;">
@@ -306,7 +325,7 @@ function mobileHtml(machineId) {
     <script>
       const machineId = ${JSON.stringify(machineId)};
       const apiBase = "/api";
-      const state = { mode: "chat", bootstrap: null };
+      const state = { mode: "chat", bootstrap: null, lastError: "", paired: false };
       const pairPanel = document.getElementById("pair-panel");
       const appPanel = document.getElementById("app-panel");
       const pairError = document.getElementById("pair-error");
@@ -326,7 +345,9 @@ function mobileHtml(machineId) {
         });
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
-          throw new Error(body.error || \`Request failed: \${response.status}\`);
+          const error = new Error(body.error || \`Request failed: \${response.status}\`);
+          error.status = response.status;
+          throw error;
         }
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("application/json")) {
@@ -363,7 +384,8 @@ function mobileHtml(machineId) {
           chip.textContent = label;
           statusChips.appendChild(chip);
         });
-        statusText.textContent = status.tunnelStatus;
+        statusText.textContent = state.lastError || status.tunnelStatus;
+        statusText.className = state.lastError ? "error" : "";
 
         messagesEl.innerHTML = "";
         (status.activity || []).slice(0, 12).forEach((item) => {
@@ -391,10 +413,23 @@ function mobileHtml(machineId) {
       async function bootstrap() {
         try {
           state.bootstrap = await request(\`\${apiBase}/bootstrap/\${machineId}\`, { method: "GET" });
+          state.lastError = "";
+          state.paired = true;
           render();
-        } catch {
-          pairPanel.classList.remove("hidden");
-          appPanel.classList.add("hidden");
+        } catch (error) {
+          if (error.status === 401 || !state.paired) {
+            pairPanel.classList.remove("hidden");
+            appPanel.classList.add("hidden");
+            if (error.status !== 401) {
+              pairError.textContent = error.message;
+              pairError.classList.remove("hidden");
+            }
+            return;
+          }
+          state.lastError = error.message;
+          pairPanel.classList.add("hidden");
+          appPanel.classList.remove("hidden");
+          render();
         }
       }
 
@@ -405,6 +440,7 @@ function mobileHtml(machineId) {
             method: "POST",
             body: JSON.stringify({ code: document.getElementById("pair-code").value }),
           });
+          state.paired = true;
           await bootstrap();
         } catch (error) {
           pairError.textContent = error.message;
@@ -454,7 +490,8 @@ function mobileHtml(machineId) {
           promptInput.value = "";
           await bootstrap();
         } catch (error) {
-          alert(error.message);
+          state.lastError = error.message;
+          render();
         } finally {
           submitButton.disabled = false;
         }
