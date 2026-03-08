@@ -1,0 +1,4832 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { FitAddon } from "@xterm/addon-fit";
+import clsx from "clsx";
+import {
+  AudioLines,
+  Bot,
+  ChevronRight,
+  ChevronDown,
+  Code2,
+  Copy,
+  Download,
+  Eye,
+  Files,
+  Folder,
+  FolderPlus,
+  FolderOpen,
+  Globe,
+  ImagePlus,
+  MoveDown,
+  MoveUp,
+  MessageSquarePlus,
+  Mic,
+  Pencil,
+  Pin,
+  RefreshCcw,
+  Save,
+  Send,
+  Settings2,
+  Square,
+  Trash2,
+  Video,
+  Volume2,
+  WandSparkles,
+  Wifi,
+} from "lucide-react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Terminal as XTerm } from "xterm";
+import { api, events } from "./lib/tauri";
+import { useAppStore } from "./store/appStore";
+import type { MediaAsset, Message, Settings, StreamEvent, WorkspaceItem, WorkspaceMediaFile } from "./types";
+
+type AppPage = "chat" | "imagine" | "voice" | "editor" | "ide";
+type RightPanelMode = "workspace" | "browser";
+type DragMode = "left" | "right" | "footer";
+
+interface DragState {
+  mode: DragMode;
+  startX: number;
+  startY: number;
+  startValue: number;
+}
+
+interface ShellChromeActions {
+  openBrowserPreview: (html: string) => void;
+  openEditorAsset: (asset: MediaAsset) => void;
+}
+
+interface EditorClip {
+  id: string;
+  asset: MediaAsset;
+  trimStart: string;
+  trimEnd: string;
+  stillDuration: string;
+}
+
+interface TimelineTrackItem {
+  clip: EditorClip;
+  start: number;
+  duration: number;
+  end: number;
+}
+
+interface IdeTreeNode {
+  id: string;
+  name: string;
+  path: string;
+  kind: "folder" | "file";
+  file?: WorkspaceItem;
+  children?: IdeTreeNode[];
+}
+
+interface IdeContextMenuState {
+  node: IdeTreeNode;
+  x: number;
+  y: number;
+}
+
+interface ConversationContextMenuState {
+  conversation: {
+    id: string;
+    title: string;
+    pinned: boolean;
+  };
+  x: number;
+  y: number;
+}
+
+interface ConversationRenameState {
+  id: string;
+  title: string;
+}
+
+const ShellChromeContext = createContext<ShellChromeActions | null>(null);
+
+const CHAT_MODELS = [
+  "grok-4-1-fast-reasoning",
+  "grok-4-1-fast-non-reasoning",
+  "grok-code-fast-1",
+  "grok-4-fast-reasoning",
+  "grok-4-fast-non-reasoning",
+  "grok-4-0709",
+  "grok-3-mini",
+  "grok-3",
+];
+
+const IMAGE_MODELS = ["grok-imagine-image-pro", "grok-imagine-image"];
+const VIDEO_MODELS = ["grok-imagine-video"];
+const IMAGE_ASPECT_OPTIONS = ["1:1", "16:9", "9:16", "4:3", "3:4"];
+const IMAGE_RESOLUTION_OPTIONS = ["1k", "2k"];
+const XAI_VOICE_OPTIONS = [
+  { id: "eve", label: "Eve" },
+  { id: "ara", label: "Ara" },
+  { id: "rex", label: "Rex" },
+  { id: "sal", label: "Sal" },
+  { id: "leo", label: "Leo" },
+];
+const REALTIME_AUDIO_RATE = 24_000;
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function estimateSelectedTokens(items: WorkspaceItem[], selection: Record<string, boolean>) {
+  return Math.round(
+    items
+      .filter((item) => selection[item.id] && item.chunkCount > 0)
+      .reduce((sum, item) => sum + item.byteSize, 0) / 4,
+  );
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildPreviewDocument(code: string, language?: string) {
+  const normalized = (language ?? "").toLowerCase();
+  if (["html", "htm"].includes(normalized)) {
+    return code;
+  }
+  if (normalized === "css") {
+    return `<!doctype html><html><head><style>${code}</style></head><body><main class="preview-root">CSS preview</main></body></html>`;
+  }
+  if (["javascript", "js", "mjs"].includes(normalized)) {
+    return `<!doctype html><html><body><div id="app"></div><script type="module">${code}</script></body></html>`;
+  }
+  return `<!doctype html><html><body style="margin:0;background:#070809;color:#f5f5f4;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;"><pre style="margin:0;padding:18px;white-space:pre-wrap;">${escapeHtml(code)}</pre></body></html>`;
+}
+
+function buildAssetPreviewDocument(asset: MediaAsset, src: string) {
+  const shell = "margin:0;min-height:100vh;background:#050607;color:#f5f5f4;color-scheme:dark;";
+  const scrollbar =
+    "html{scrollbar-color:rgba(132,160,155,0.48) #050607;}::-webkit-scrollbar{width:12px;height:12px;background:#050607;}::-webkit-scrollbar-thumb{border-radius:999px;background:linear-gradient(180deg,rgba(132,160,155,0.55),rgba(125,211,252,0.4));border:2px solid #050607;}::-webkit-scrollbar-corner{background:#050607;}";
+  const fitStyle =
+    "display:block;width:auto;height:auto;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);object-fit:contain;margin:auto;";
+  if (asset.kind === "image") {
+    return `<!doctype html><html><head><style>${scrollbar}</style></head><body style="${shell}display:grid;place-items:center;padding:12px;overflow:auto;"><img src="${src}" style="${fitStyle}" /></body></html>`;
+  }
+  if (asset.kind === "video") {
+    return `<!doctype html><html><head><style>${scrollbar}</style></head><body style="${shell}display:grid;place-items:center;padding:12px;overflow:auto;"><video src="${src}" controls autoplay style="${fitStyle}" playsinline></video></body></html>`;
+  }
+  return `<!doctype html><html><head><style>${scrollbar}</style></head><body style="${shell}display:grid;place-items:center;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;"><audio src="${src}" controls autoplay></audio></body></html>`;
+}
+
+function extensionForLanguage(language?: string) {
+  switch ((language ?? "").toLowerCase()) {
+    case "html":
+    case "htm":
+      return "html";
+    case "css":
+      return "css";
+    case "javascript":
+    case "js":
+    case "mjs":
+      return "js";
+    case "typescript":
+    case "ts":
+      return "ts";
+    case "tsx":
+      return "tsx";
+    case "json":
+      return "json";
+    case "rust":
+    case "rs":
+      return "rs";
+    case "python":
+    case "py":
+      return "py";
+    case "markdown":
+    case "md":
+      return "md";
+    default:
+      return "txt";
+  }
+}
+
+function leafName(path: string) {
+  const parts = path.split("/");
+  return parts[parts.length - 1] ?? path;
+}
+
+function parentPath(path: string) {
+  const normalized = path.replace(/\/+$/, "");
+  const lastSlash = normalized.lastIndexOf("/");
+  return lastSlash > 0 ? normalized.slice(0, lastSlash) : "";
+}
+
+function renamedPath(path: string, nextName: string) {
+  const parent = parentPath(path);
+  return parent ? `${parent}/${nextName}` : nextName;
+}
+
+function replacePathPrefix(path: string, from: string, to: string) {
+  if (path === from) {
+    return to;
+  }
+  return path.startsWith(`${from}/`) ? `${to}${path.slice(from.length)}` : path;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+function formatEditableDuration(value: number) {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  const normalized = Math.max(0, value);
+  return normalized.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function shouldStartWindowDrag(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return true;
+  }
+
+  return !target.closest(
+    '[data-no-drag="true"],button,input,select,textarea,a,[role="button"],[contenteditable="true"]',
+  );
+}
+
+function relativeWorkspacePath(path: string, roots: string[]) {
+  const normalizedPath = path.replace(/\\/g, "/");
+  for (const root of roots) {
+    const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalizedPath === normalizedRoot) {
+      return leafName(normalizedPath);
+    }
+    if (normalizedPath.startsWith(`${normalizedRoot}/`)) {
+      return normalizedPath.slice(normalizedRoot.length + 1);
+    }
+  }
+  return leafName(normalizedPath);
+}
+
+function isSameOrDescendantPath(path: string, root: string) {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
+function buildIdeTree(items: WorkspaceItem[], roots: string[]) {
+  const rootNodes = new Map<string, IdeTreeNode>();
+
+  for (const root of roots) {
+    rootNodes.set(root, {
+      id: `root:${root}`,
+      name: leafName(root),
+      path: root,
+      kind: "folder",
+      children: [],
+    });
+  }
+
+  items.forEach((item) => {
+    const rootPath = roots.find((root) => isSameOrDescendantPath(item.path, root));
+    const rootKey = rootPath ?? roots[0] ?? item.workspaceId;
+    const rootNode =
+      rootNodes.get(rootKey) ??
+      {
+        id: `root:${rootKey}`,
+        name: leafName(rootKey),
+        path: rootKey,
+        kind: "folder" as const,
+        children: [],
+      };
+    rootNodes.set(rootKey, rootNode);
+
+    const parts = relativeWorkspacePath(item.path, roots).split("/").filter(Boolean);
+    let currentNode = rootNode;
+
+    parts.forEach((part, index) => {
+      const isLeaf = index === parts.length - 1;
+      currentNode.children ??= [];
+      let nextNode = currentNode.children.find((child) => child.name === part);
+      if (!nextNode) {
+        const nodePath = isLeaf ? item.path : `${currentNode.path}/${part}`;
+        nextNode = {
+          id: isLeaf ? `file:${item.id}` : `folder:${nodePath}`,
+          name: part,
+          path: nodePath,
+          kind: isLeaf ? "file" : "folder",
+          file: isLeaf ? item : undefined,
+          children: isLeaf ? undefined : [],
+        };
+        currentNode.children.push(nextNode);
+        currentNode.children.sort((left, right) => {
+          if (left.kind !== right.kind) {
+            return left.kind === "folder" ? -1 : 1;
+          }
+          return left.name.localeCompare(right.name);
+        });
+      }
+      currentNode = nextNode;
+    });
+  });
+
+  return Array.from(rootNodes.values());
+}
+
+function extractAssistantCode(text: string) {
+  const fenced = text.match(/```(?:[\w-]+)?\n([\s\S]*?)```/);
+  return (fenced?.[1] ?? text).trim();
+}
+
+function encodePcm16Base64(input: Float32Array) {
+  const buffer = new ArrayBuffer(input.length * 2);
+  const view = new DataView(buffer);
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[index] ?? 0));
+    view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function decodeBase64Bytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function pcm16BytesToFloat32(bytes: Uint8Array) {
+  const sampleCount = Math.floor(bytes.byteLength / 2);
+  const floats = new Float32Array(sampleCount);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let index = 0; index < sampleCount; index += 1) {
+    floats[index] = view.getInt16(index * 2, true) / 0x8000;
+  }
+  return floats;
+}
+
+function normalizeVoiceId(value?: string | null) {
+  const trimmed = value?.trim();
+  const normalized = trimmed ? trimmed.toLowerCase() : "eve";
+  return XAI_VOICE_OPTIONS.some((voice) => voice.id === normalized) ? normalized : "eve";
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  const element = target as HTMLElement | null;
+  if (!element) {
+    return false;
+  }
+  const tag = element.tagName?.toLowerCase();
+  return (
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select" ||
+    element.isContentEditable
+  );
+}
+
+function GrokMark({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 1024 1024" aria-hidden="true" className={className}>
+      <rect width="1024" height="1024" rx="224" fill="#000000" />
+      <circle cx="512" cy="512" r="330" fill="#ffffff" />
+      <circle cx="512" cy="512" r="205" fill="#000000" />
+      <rect x="566" y="214" width="248" height="260" fill="#000000" />
+      <rect x="512" y="466" width="252" height="96" rx="48" fill="#ffffff" />
+    </svg>
+  );
+}
+
+async function requestMicrophoneStream() {
+  if (navigator.mediaDevices?.getUserMedia) {
+    return navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+  }
+
+  const legacyGetUserMedia =
+    (navigator as Navigator & {
+      getUserMedia?: (
+        constraints: MediaStreamConstraints,
+        onSuccess: (stream: MediaStream) => void,
+        onError: (error: Error) => void,
+      ) => void;
+      webkitGetUserMedia?: (
+        constraints: MediaStreamConstraints,
+        onSuccess: (stream: MediaStream) => void,
+        onError: (error: Error) => void,
+      ) => void;
+    }).webkitGetUserMedia ??
+    (navigator as Navigator & {
+      getUserMedia?: (
+        constraints: MediaStreamConstraints,
+        onSuccess: (stream: MediaStream) => void,
+        onError: (error: Error) => void,
+      ) => void;
+    }).getUserMedia;
+
+  if (!legacyGetUserMedia) {
+    throw new Error("Microphone capture is unavailable in this runtime.");
+  }
+
+  return new Promise<MediaStream>((resolve, reject) => {
+    legacyGetUserMedia.call(
+      navigator,
+      {
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      },
+      resolve,
+      reject,
+    );
+  });
+}
+
+function createEditorClip(asset: MediaAsset): EditorClip {
+  return {
+    id: `${asset.id}-${Date.now()}`,
+    asset,
+    trimStart: "0",
+    trimEnd: "",
+    stillDuration: "3",
+  };
+}
+
+function parseSecondsInput(value: string, fallback?: number) {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function getEditorClipDuration(clip: EditorClip) {
+  if (clip.asset.kind === "image") {
+    return Math.max(parseSecondsInput(clip.stillDuration, 3) ?? 3, 0.5);
+  }
+  const trimStart = parseSecondsInput(clip.trimStart, 0) ?? 0;
+  const trimEnd = parseSecondsInput(clip.trimEnd);
+  if (trimEnd !== undefined && trimEnd > trimStart) {
+    return Math.max(trimEnd - trimStart, 0.5);
+  }
+  return clip.asset.kind === "video" ? 6 : 8;
+}
+
+function formatTimelineSeconds(value: number) {
+  const rounded = value >= 10 ? value.toFixed(0) : value.toFixed(1);
+  return `${rounded.replace(/\.0$/, "")}s`;
+}
+
+function buildTimelineTrack(clips: EditorClip[], track: "visual" | "audio") {
+  let cursor = 0;
+  const items: TimelineTrackItem[] = [];
+
+  clips.forEach((clip) => {
+    const belongsToTrack = track === "visual" ? clip.asset.kind !== "audio" : clip.asset.kind === "audio";
+    if (!belongsToTrack) {
+      return;
+    }
+    const duration = getEditorClipDuration(clip);
+    items.push({
+      clip,
+      start: cursor,
+      duration,
+      end: cursor + duration,
+    });
+    cursor += duration;
+  });
+
+  return { items, duration: cursor };
+}
+
+function buildClipTrimPatch(clip: EditorClip, side: "start" | "end", deltaSeconds: number): Partial<EditorClip> {
+  if (clip.asset.kind === "image") {
+    const currentDuration = getEditorClipDuration(clip);
+    const nextDuration =
+      side === "start"
+        ? Math.max(0.5, currentDuration - deltaSeconds)
+        : Math.max(0.5, currentDuration + deltaSeconds);
+    return { stillDuration: formatEditableDuration(nextDuration) };
+  }
+
+  const currentStart = parseSecondsInput(clip.trimStart, 0) ?? 0;
+  const currentDuration = getEditorClipDuration(clip);
+  const currentEnd = parseSecondsInput(clip.trimEnd, currentStart + currentDuration) ?? currentStart + currentDuration;
+
+  if (side === "start") {
+    const nextStart = Math.max(0, Math.min(currentEnd - 0.5, currentStart + deltaSeconds));
+    return { trimStart: formatEditableDuration(nextStart) };
+  }
+
+  const nextEnd = Math.max(currentStart + 0.5, currentEnd + deltaSeconds);
+  return { trimEnd: formatEditableDuration(nextEnd) };
+}
+
+function App() {
+  const initialize = useAppStore((state) => state.initialize);
+  const booting = useAppStore((state) => state.booting);
+  const error = useAppStore((state) => state.error);
+  const clearError = useAppStore((state) => state.clearError);
+
+  useEffect(() => {
+    void initialize();
+  }, [initialize]);
+
+  useEffect(() => {
+    if (!error) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => clearError(), 5000);
+    return () => window.clearTimeout(timer);
+  }, [clearError, error]);
+
+  if (booting) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-transparent px-4 py-6 font-['Manrope'] text-stone-200">
+        <div className="w-full max-w-3xl rounded-[30px] border border-white/8 bg-[#070809] p-6 shadow-[0_28px_80px_rgba(0,0,0,0.62)]">
+          <p className="text-[10px] uppercase tracking-[0.42em] text-[#7a9a96]">Grok Desktop</p>
+          <h1 className="mt-4 text-[26px] font-semibold text-stone-100">Loading the Grok shell…</h1>
+          <p className="mt-2 text-[12px] text-stone-500">
+            Restoring chats, gallery, terminal session, and workspace state.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-transparent p-1 font-['Manrope'] text-[11px] text-stone-100">
+      <GrokShell />
+      {error ? (
+        <div className="pointer-events-none fixed inset-x-0 top-4 z-50 mx-auto w-fit rounded-full border border-rose-300/18 bg-rose-500/12 px-3 py-1.5 text-[11px] text-rose-100 shadow-lg backdrop-blur-xl">
+          {error}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function GrokShell() {
+  const settingsOpen = useAppStore((state) => state.settingsOpen);
+  const toggleSettings = useAppStore((state) => state.toggleSettings);
+  const openBrowserPreviewInStore = useAppStore((state) => state.openBrowserPreview);
+  const [page, setPage] = useState<AppPage>("chat");
+  const [rightPanelVisible, setRightPanelVisible] = useState(true);
+  const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>("workspace");
+  const [terminalVisible, setTerminalVisible] = useState(false);
+  const [leftWidth, setLeftWidth] = useState(210);
+  const [rightWidth, setRightWidth] = useState(340);
+  const [footerHeight, setFooterHeight] = useState(220);
+  const [editorClips, setEditorClips] = useState<EditorClip[]>([]);
+  const [activeEditorClipId, setActiveEditorClipId] = useState<string>();
+  const [dragState, setDragState] = useState<DragState | null>(null);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+
+  useEffect(() => {
+    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!dragState) {
+      return undefined;
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (dragState.mode === "left") {
+        setLeftWidth(dragState.startValue + (event.clientX - dragState.startX));
+        return;
+      }
+      if (dragState.mode === "right") {
+        setRightWidth(dragState.startValue - (event.clientX - dragState.startX));
+        return;
+      }
+      setFooterHeight(dragState.startValue - (event.clientY - dragState.startY));
+    };
+
+    const onPointerUp = () => setDragState(null);
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [dragState]);
+
+  useEffect(() => {
+    if (!controlsOpen) {
+      return undefined;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (!controlsRef.current?.contains(event.target as Node)) {
+        setControlsOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [controlsOpen]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      if (event.ctrlKey && !event.metaKey && !event.altKey && (event.key === "`" || event.key === "~")) {
+        event.preventDefault();
+        setTerminalVisible((value) => !value);
+        setControlsOpen(false);
+        return;
+      }
+
+      if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        setRightPanelVisible((value) => !value);
+        setControlsOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const clampedLeftWidth = clamp(leftWidth, 180, Math.max(180, Math.floor(viewport.width * 0.28)));
+  const showHistoryRail = page === "chat";
+  const showShellRightSidebar = page !== "ide" && rightPanelVisible;
+  const clampedRightWidth = showShellRightSidebar
+    ? clamp(rightWidth, 280, Math.max(280, Math.floor(viewport.width * 0.42)))
+    : 0;
+  const clampedFooterHeight = terminalVisible
+    ? clamp(footerHeight, 150, Math.max(150, Math.floor(viewport.height * 0.42)))
+    : 0;
+  const chromeActions = useMemo<ShellChromeActions>(
+    () => ({
+      openBrowserPreview: (html) => {
+        openBrowserPreviewInStore(html);
+        setRightPanelVisible(true);
+        setRightPanelMode("browser");
+      },
+      openEditorAsset: (asset) => {
+        const clip = createEditorClip(asset);
+        setEditorClips((current) => [...current, clip]);
+        setActiveEditorClipId(clip.id);
+        setPage("editor");
+      },
+    }),
+    [openBrowserPreviewInStore],
+  );
+
+  return (
+    <ShellChromeContext.Provider value={chromeActions}>
+      <main className="h-[calc(100vh-8px)] w-full bg-transparent p-1">
+        <div
+          className="grid h-full min-h-0 overflow-hidden rounded-[34px] border border-white/[0.05] bg-[radial-gradient(circle_at_top_left,rgba(26,34,33,0.32),rgba(6,7,8,0.985)_42%)] shadow-[0_32px_120px_rgba(0,0,0,0.72)]"
+          style={{
+            gridTemplateColumns: showHistoryRail
+              ? `${clampedLeftWidth}px 8px minmax(0,1fr) ${showShellRightSidebar ? 8 : 0}px ${clampedRightWidth}px`
+              : `minmax(0,1fr) ${showShellRightSidebar ? 8 : 0}px ${clampedRightWidth}px`,
+            gridTemplateRows: terminalVisible ? `58px minmax(0,1fr) 8px ${clampedFooterHeight}px` : "58px minmax(0,1fr)",
+          }}
+        >
+          <div className="col-[1/-1]">
+            <TopBar
+              page={page}
+              onSelectPage={setPage}
+              controlsOpen={controlsOpen}
+              controlsRef={controlsRef}
+              onToggleControls={() => setControlsOpen((value) => !value)}
+              onToggleRightPanel={() => {
+                setRightPanelVisible((value) => !value);
+                setControlsOpen(false);
+              }}
+              onToggleTerminal={() => {
+                setTerminalVisible((value) => !value);
+                setControlsOpen(false);
+              }}
+            />
+          </div>
+
+          {showHistoryRail ? <HistoryRail /> : null}
+          {showHistoryRail ? (
+            <ResizeHandle
+              orientation="vertical"
+              onPointerDown={(event) =>
+                setDragState({
+                  mode: "left",
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  startValue: clampedLeftWidth,
+                })
+              }
+            />
+          ) : null}
+
+          <section className="flex min-h-0 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(10,11,13,0.98),rgba(7,8,10,0.97))]">
+            <CenterStage
+              page={page}
+              onShowBrowser={() => setRightPanelMode("browser")}
+              editorClips={editorClips}
+              activeEditorClipId={activeEditorClipId}
+              onSelectEditorClip={setActiveEditorClipId}
+              onUpdateEditorClip={(clipId, patch) =>
+                setEditorClips((current) =>
+                  current.map((clip) => (clip.id === clipId ? { ...clip, ...patch } : clip)),
+                )
+              }
+              onRemoveEditorClip={(clipId) => {
+                setEditorClips((current) => current.filter((clip) => clip.id !== clipId));
+                setActiveEditorClipId((current) => (current === clipId ? undefined : current));
+              }}
+              onMoveEditorClip={(clipId, direction) =>
+                setEditorClips((current) => {
+                  const index = current.findIndex((clip) => clip.id === clipId);
+                  if (index < 0) {
+                    return current;
+                  }
+                  const nextIndex = direction === "up" ? index - 1 : index + 1;
+                  if (nextIndex < 0 || nextIndex >= current.length) {
+                    return current;
+                  }
+                  const next = [...current];
+                  const [clip] = next.splice(index, 1);
+                  next.splice(nextIndex, 0, clip);
+                  return next;
+                })
+              }
+              onClearEditor={() => {
+                setEditorClips([]);
+                setActiveEditorClipId(undefined);
+              }}
+            />
+          </section>
+
+          {showShellRightSidebar ? (
+            <ResizeHandle
+              orientation="vertical"
+              onPointerDown={(event) =>
+                setDragState({
+                  mode: "right",
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  startValue: clampedRightWidth,
+                })
+              }
+            />
+          ) : (
+            <div />
+          )}
+
+          {showShellRightSidebar ? (
+            <RightSidebar
+              page={page}
+              mode={rightPanelMode}
+              onSelectMode={setRightPanelMode}
+            />
+          ) : (
+            <div />
+          )}
+
+          {terminalVisible ? (
+            <>
+              <div className="col-[1/-1]">
+                <ResizeHandle
+                  orientation="horizontal"
+                  onPointerDown={(event) =>
+                    setDragState({
+                      mode: "footer",
+                      startX: event.clientX,
+                      startY: event.clientY,
+                      startValue: clampedFooterHeight,
+                    })
+                  }
+                />
+              </div>
+              <div className="col-[1/-1] min-h-0 overflow-hidden">
+                <TerminalPanel />
+              </div>
+            </>
+          ) : null}
+        </div>
+      </main>
+      {settingsOpen ? <SettingsSheet onClose={() => toggleSettings(false)} /> : null}
+    </ShellChromeContext.Provider>
+  );
+}
+
+function TopBar({
+  page,
+  onSelectPage,
+  controlsOpen,
+  controlsRef,
+  onToggleControls,
+  onToggleRightPanel,
+  onToggleTerminal,
+}: {
+  page: AppPage;
+  onSelectPage: (page: AppPage) => void;
+  controlsOpen: boolean;
+  controlsRef: React.RefObject<HTMLDivElement | null>;
+  onToggleControls: () => void;
+  onToggleRightPanel: () => void;
+  onToggleTerminal: () => void;
+}) {
+  const providerStatuses = useAppStore((state) => state.providerStatuses);
+  const toggleSettings = useAppStore((state) => state.toggleSettings);
+  const currentWindow = getCurrentWindow();
+  const xaiReady = providerStatuses.find((status) => status.providerId === "xai")?.configured;
+  const navRef = useRef<HTMLDivElement>(null);
+  const [navIndicator, setNavIndicator] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
+
+  useLayoutEffect(() => {
+    const updateIndicator = () => {
+      const nav = navRef.current;
+      if (!nav) {
+        return;
+      }
+      const activeTab = nav.querySelector<HTMLButtonElement>(`button[data-page="${page}"]`);
+      if (!activeTab) {
+        return;
+      }
+      setNavIndicator({
+        left: activeTab.offsetLeft,
+        width: activeTab.offsetWidth,
+      });
+    };
+
+    updateIndicator();
+    window.addEventListener("resize", updateIndicator);
+    return () => window.removeEventListener("resize", updateIndicator);
+  }, [page]);
+
+  const handleTopBarPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !shouldStartWindowDrag(event.target)) {
+      return;
+    }
+
+    event.preventDefault();
+    void currentWindow.startDragging();
+  };
+
+  return (
+    <div
+      onPointerDown={handleTopBarPointerDown}
+      className="flex select-none items-center gap-3 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,11,13,0.98),rgba(8,9,11,0.94))] px-3 py-2"
+    >
+      <div className="flex items-center gap-2" data-no-drag="true">
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            void currentWindow.close();
+          }}
+          className="h-3 w-3 rounded-full bg-[#ff5f57] shadow-[0_0_0_1px_rgba(0,0,0,0.28)] transition hover:brightness-110"
+          aria-label="Close window"
+        />
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            void currentWindow.minimize();
+          }}
+          className="h-3 w-3 rounded-full bg-[#ffbd2f] shadow-[0_0_0_1px_rgba(0,0,0,0.28)] transition hover:brightness-110"
+          aria-label="Minimize window"
+        />
+      </div>
+
+      <div className="flex min-w-0 flex-1 items-center gap-2.5" data-tauri-drag-region>
+        <div className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-xl border border-white/8 bg-white/5">
+          <GrokMark className="h-full w-full" />
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-[12px] font-semibold tracking-[0.12em] text-stone-100">Grok Desktop</p>
+          <p className="truncate text-[10px] text-stone-500">
+            {xaiReady ? "xAI key ready" : "Add an xAI API key in settings"}
+          </p>
+        </div>
+      </div>
+
+      <nav
+        ref={navRef}
+        className="relative hidden items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] p-0.5 md:flex"
+        data-no-drag="true"
+      >
+        <div
+          className="absolute inset-y-0.5 rounded-full bg-emerald-300/14 shadow-[0_0_0_1px_rgba(110,231,183,0.1),0_10px_22px_rgba(16,185,129,0.18)] transition-[left,width] duration-300 ease-out"
+          style={{ left: navIndicator.left + 2, width: Math.max(navIndicator.width - 4, 0) }}
+        />
+        <NavTab pageId="chat" active={page === "chat"} onClick={() => onSelectPage("chat")}>
+          CHAT
+        </NavTab>
+        <NavTab pageId="imagine" active={page === "imagine"} onClick={() => onSelectPage("imagine")}>
+          IMAGINE
+        </NavTab>
+        <NavTab pageId="voice" active={page === "voice"} onClick={() => onSelectPage("voice")}>
+          VOICE & AUDIO
+        </NavTab>
+        <NavTab pageId="editor" active={page === "editor"} onClick={() => onSelectPage("editor")}>
+          MEDIA EDITOR
+        </NavTab>
+        <NavTab pageId="ide" active={page === "ide"} onClick={() => onSelectPage("ide")}>
+          IDE
+        </NavTab>
+      </nav>
+
+      <div ref={controlsRef} className="relative" data-no-drag="true">
+        <button
+          type="button"
+          onClick={onToggleControls}
+          className="inline-flex items-center gap-1 rounded-xl border border-white/8 bg-white/5 px-2 py-1 text-[10px] text-stone-300 transition hover:bg-white/10"
+          aria-label="Toggle shell controls"
+        >
+          Shell
+          <ChevronDown className="h-3 w-3" />
+        </button>
+        {controlsOpen ? (
+          <div className="absolute right-0 top-[calc(100%+8px)] z-30 w-48 rounded-[18px] border border-white/8 bg-[#0b0c0d] p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)]">
+            <button
+              type="button"
+              onClick={onToggleRightPanel}
+              className="flex w-full items-center justify-between rounded-xl px-2.5 py-1.5 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+            >
+              <span>Sidebar</span>
+              <span className="font-['IBM_Plex_Mono'] text-[9px] text-stone-500">Ctrl+Shift+S</span>
+            </button>
+            <button
+              type="button"
+              onClick={onToggleTerminal}
+              className="mt-1 flex w-full items-center justify-between rounded-xl px-2.5 py-1.5 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+            >
+              <span>Terminal</span>
+              <span className="font-['IBM_Plex_Mono'] text-[9px] text-stone-500">Ctrl+~</span>
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => toggleSettings()}
+        className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/5 px-2.5 py-1 text-[10px] text-stone-200 transition hover:bg-white/10"
+        aria-label="Open settings"
+        data-no-drag="true"
+      >
+        <Settings2 className="h-3.5 w-3.5" />
+        Settings
+      </button>
+    </div>
+  );
+}
+
+function NavTab({
+  pageId,
+  active,
+  onClick,
+  children,
+}: {
+  pageId: AppPage;
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      data-page={pageId}
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "relative z-10 rounded-full px-2.5 py-1 text-[10px] font-semibold tracking-[0.18em] transition-colors duration-300",
+        active ? "text-emerald-50" : "text-stone-400 hover:text-stone-100",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function HistoryRail() {
+  const conversations = useAppStore((state) => state.conversations);
+  const activeConversationId = useAppStore((state) => state.activeConversation?.conversation.id);
+  const createConversation = useAppStore((state) => state.createConversation);
+  const loadConversation = useAppStore((state) => state.loadConversation);
+  const renameConversation = useAppStore((state) => state.renameConversation);
+  const toggleConversationPin = useAppStore((state) => state.toggleConversationPin);
+  const deleteConversation = useAppStore((state) => state.deleteConversation);
+  const [contextMenu, setContextMenu] = useState<ConversationContextMenuState>();
+  const [renameDialog, setRenameDialog] = useState<ConversationRenameState>();
+  const [renameDraft, setRenameDraft] = useState("");
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+    const dismiss = () => setContextMenu(undefined);
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [contextMenu]);
+
+  const openRenameDialog = (conversationId: string, title: string) => {
+    setRenameDraft(title);
+    setRenameDialog({ id: conversationId, title });
+  };
+
+  const submitRename = async () => {
+    if (!renameDialog) {
+      return;
+    }
+    const nextTitle = renameDraft.trim();
+    if (!nextTitle) {
+      return;
+    }
+    await renameConversation(renameDialog.id, nextTitle);
+    setRenameDialog(undefined);
+  };
+
+  return (
+    <aside className="flex min-h-0 flex-col bg-[linear-gradient(180deg,rgba(8,9,11,0.98),rgba(5,6,8,0.95))]">
+      <div className="border-b border-white/6 px-2.5 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">History</p>
+            <h2 className="mt-1 text-[12px] font-semibold text-stone-100">Chats</h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => void createConversation()}
+            className="inline-flex items-center gap-1 rounded-xl border border-white/8 bg-white/5 px-2 py-1 text-[10px] text-stone-200 transition hover:bg-white/10"
+          >
+            <MessageSquarePlus className="h-3 w-3" />
+            New
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 space-y-2 overflow-y-auto px-2 py-2">
+        {conversations.length ? (
+          conversations.map((conversation) => (
+            <ConversationCard
+              key={conversation.id}
+              conversation={conversation}
+              active={conversation.id === activeConversationId}
+              onOpen={() => void loadConversation(conversation.id)}
+              onTogglePin={() => void toggleConversationPin(conversation.id, !conversation.pinned)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setContextMenu({
+                  conversation: {
+                    id: conversation.id,
+                    title: conversation.title,
+                    pinned: conversation.pinned,
+                  },
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
+            />
+          ))
+        ) : (
+          <EmptyPanel
+            eyebrow="No chats"
+            title="Start a Grok thread."
+            body="Every chat is kept in this rail so you can jump back into older coding sessions."
+          />
+        )}
+      </div>
+      {contextMenu ? (
+        <div
+          className="fixed z-50 w-44 rounded-[18px] border border-white/8 bg-[#0b0c0d] p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)]"
+          style={{
+            left: Math.min(contextMenu.x, window.innerWidth - 188),
+            top: Math.min(contextMenu.y, window.innerHeight - 156),
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setContextMenu(undefined);
+              void toggleConversationPin(contextMenu.conversation.id, !contextMenu.conversation.pinned);
+            }}
+            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+          >
+            <Pin className="h-3.5 w-3.5" />
+            {contextMenu.conversation.pinned ? "Unpin" : "Pin"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const { id, title } = contextMenu.conversation;
+              setContextMenu(undefined);
+              openRenameDialog(id, title);
+            }}
+            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            Edit
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setContextMenu(undefined);
+              void deleteConversation(contextMenu.conversation.id);
+            }}
+            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-rose-100 transition hover:bg-rose-500/15"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </button>
+        </div>
+      ) : null}
+      {renameDialog ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+          onPointerDown={() => setRenameDialog(undefined)}
+        >
+          <div
+            className="w-full max-w-sm rounded-[24px] border border-white/10 bg-[#0b0c0d] p-4 shadow-[0_24px_80px_rgba(0,0,0,0.5)]"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <p className="text-[10px] uppercase tracking-[0.28em] text-[#84a09b]">Rename Chat</p>
+            <h3 className="mt-2 text-[15px] font-semibold text-stone-100">Edit conversation title</h3>
+            <input
+              autoFocus
+              value={renameDraft}
+              onChange={(event) => setRenameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void submitRename();
+                }
+                if (event.key === "Escape") {
+                  setRenameDialog(undefined);
+                }
+              }}
+              className="mt-4 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2.5 text-[12px] text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/35"
+              placeholder="Conversation title"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRenameDialog(undefined)}
+                className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-300 transition hover:bg-white/10"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitRename()}
+                disabled={!renameDraft.trim()}
+                className="rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] font-semibold text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
+function ConversationCard({
+  conversation,
+  active,
+  onOpen,
+  onTogglePin,
+  onContextMenu,
+}: {
+  conversation: { id: string; title: string; pinned: boolean; previewText?: string | null; modelId?: string | null };
+  active: boolean;
+  onOpen: () => void;
+  onTogglePin: () => void;
+  onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      onContextMenu={onContextMenu}
+      className={clsx(
+        "group w-full rounded-[16px] border px-2 py-2 text-left transition",
+        active
+          ? "border-emerald-200/18 bg-emerald-300/8"
+          : "border-white/6 bg-white/[0.025] hover:bg-white/[0.05]",
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="truncate text-[11px] font-semibold text-stone-100">{conversation.title}</p>
+            {conversation.pinned ? (
+              <span className="rounded-full border border-amber-300/18 bg-amber-300/10 px-1.5 py-0.5 font-['IBM_Plex_Mono'] text-[8px] uppercase tracking-[0.18em] text-amber-100">
+                Pinned
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 line-clamp-2 text-[10px] leading-[1.1rem] text-stone-500">
+            {conversation.previewText ?? "No preview yet"}
+          </p>
+          <p className="mt-2 font-['IBM_Plex_Mono'] text-[9px] text-stone-600">
+            {conversation.modelId ?? "awaiting model"}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onTogglePin();
+            }}
+            className="rounded-lg border border-white/8 bg-black/30 p-1 text-stone-300 hover:bg-white/8"
+            aria-label={conversation.pinned ? "Unpin conversation" : "Pin conversation"}
+          >
+            <Pin className="h-3 w-3" />
+          </button>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function CenterStage({
+  page,
+  onShowBrowser,
+  editorClips,
+  activeEditorClipId,
+  onSelectEditorClip,
+  onUpdateEditorClip,
+  onRemoveEditorClip,
+  onMoveEditorClip,
+  onClearEditor,
+}: {
+  page: AppPage;
+  onShowBrowser: () => void;
+  editorClips: EditorClip[];
+  activeEditorClipId?: string;
+  onSelectEditorClip: (clipId?: string) => void;
+  onUpdateEditorClip: (clipId: string, patch: Partial<EditorClip>) => void;
+  onRemoveEditorClip: (clipId: string) => void;
+  onMoveEditorClip: (clipId: string, direction: "up" | "down") => void;
+  onClearEditor: () => void;
+}) {
+  let content: React.ReactNode;
+  if (page === "imagine") {
+    content = <ImaginePage onShowBrowser={onShowBrowser} />;
+  } else if (page === "voice") {
+    content = <VoiceAudioPage onShowBrowser={onShowBrowser} />;
+  } else if (page === "editor") {
+    content = (
+      <EditorPage
+        clips={editorClips}
+        activeClipId={activeEditorClipId}
+        onSelectClip={onSelectEditorClip}
+        onUpdateClip={onUpdateEditorClip}
+        onRemoveClip={onRemoveEditorClip}
+        onMoveClip={onMoveEditorClip}
+        onClear={onClearEditor}
+      />
+    );
+  } else if (page === "ide") {
+    content = <IdePage onShowBrowser={onShowBrowser} />;
+  } else {
+    content = <ChatPage />;
+  }
+  return (
+    <div key={page} className="flex h-full min-h-0 flex-col overflow-hidden [animation:page-swap_220ms_ease-out]">
+      {content}
+    </div>
+  );
+}
+
+function ChatPage() {
+  const conversation = useAppStore((state) => state.activeConversation);
+  const composer = useAppStore((state) => state.composer);
+  const sending = useAppStore((state) => state.sending);
+  const selectedModel = useAppStore((state) => state.selectedModel);
+  const models = useAppStore((state) => state.models);
+  const providerStatuses = useAppStore((state) => state.providerStatuses);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const workspaceItemsMap = useAppStore((state) => state.workspaceItems);
+  const workspaceSelection = useAppStore((state) => state.workspaceSelection);
+  const selectModel = useAppStore((state) => state.selectModel);
+  const setComposer = useAppStore((state) => state.setComposer);
+  const sendMessage = useAppStore((state) => state.sendMessage);
+  const stopStream = useAppStore((state) => state.stopStream);
+
+  const workspaceItems = activeWorkspaceId ? workspaceItemsMap[activeWorkspaceId] ?? [] : [];
+  const selectedWorkspaceItems = useMemo(
+    () => workspaceItems.filter((item) => workspaceSelection[item.id]),
+    [workspaceItems, workspaceSelection],
+  );
+  const selectedTokens = useMemo(
+    () => estimateSelectedTokens(workspaceItems, workspaceSelection),
+    [workspaceItems, workspaceSelection],
+  );
+  const xaiReady = providerStatuses.find((status) => status.providerId === "xai")?.available ?? true;
+
+  return (
+    <section className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
+      <div className="min-h-0 overflow-y-auto px-3 py-3">
+        {conversation?.messages.length ? (
+          <div className="space-y-3">
+            {conversation.messages.map((message) => (
+              <MessageBubble key={message.id} message={message} />
+            ))}
+          </div>
+        ) : (
+          <EmptyPanel
+            eyebrow="Chat"
+            title="Grok coding shell."
+            body="Use one of the Grok language models, run local commands in the footer terminal, and send workspace-backed prompts from this page."
+          />
+        )}
+      </div>
+
+      <div className="border-t border-white/6 bg-[linear-gradient(180deg,rgba(11,12,14,0.98),rgba(8,9,11,0.98))] px-3 py-2.5">
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[10px] text-stone-500">
+          <span className="rounded-full border border-white/7 bg-white/[0.03] px-3 py-1">
+            {selectedWorkspaceItems.length} context files
+          </span>
+          <span className="rounded-full border border-white/7 bg-white/[0.03] px-3 py-1 font-['IBM_Plex_Mono']">
+            ~{selectedTokens} tokens
+          </span>
+          {!xaiReady ? (
+            <span className="rounded-full border border-amber-200/20 bg-amber-300/10 px-3 py-1 text-amber-100">
+              xAI unavailable
+            </span>
+          ) : null}
+        </div>
+
+        <div className="rounded-[20px] border border-white/7 bg-black/30 p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <div className="rounded-xl border border-white/8 bg-black/35 px-2 py-1.5 text-[10px] font-semibold text-stone-200">
+              xAI
+            </div>
+            <select
+              value={selectedModel ?? ""}
+              onChange={(event) => selectModel(event.target.value)}
+              className="min-w-56 rounded-xl border border-white/8 bg-black/35 px-2 py-1.5 font-['IBM_Plex_Mono'] text-[10px] text-stone-300 outline-none transition focus:border-sky-300/40"
+            >
+              {(models.xai.length ? models.xai : CHAT_MODELS.map((modelId) => ({ modelId, label: modelId } as const))).map(
+                (model) => (
+                  <option key={model.modelId} value={model.modelId}>
+                    {model.label}
+                  </option>
+                ),
+              )}
+            </select>
+          </div>
+          <textarea
+            value={composer}
+            onChange={(event) => setComposer(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void sendMessage();
+              }
+            }}
+            placeholder="Ask Grok about your code, workspace, build issue, or next step…"
+            className="min-h-24 w-full resize-none bg-transparent px-1.5 py-1 text-[12px] leading-5 text-stone-100 outline-none placeholder:text-stone-600"
+          />
+          <div className="mt-1.5 flex items-center justify-between gap-3">
+            <p className="text-[10px] text-stone-600">Shift + Enter for a newline</p>
+            {sending ? (
+              <button
+                type="button"
+                onClick={() => void stopStream()}
+                className="flex items-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-1.5 text-[10px] text-stone-100 transition hover:bg-white/10"
+              >
+                <Square className="h-3 w-3" />
+                Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void sendMessage()}
+                disabled={!xaiReady}
+                className="flex items-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-1.5 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/4 disabled:text-stone-500"
+              >
+                <Send className="h-3 w-3" />
+                Send
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MessageBubble({ message }: { message: Message }) {
+  const isAssistant = message.role === "assistant";
+  return (
+    <article
+      className={clsx(
+        "max-w-[92%] rounded-[20px] border px-3.5 py-2.5 shadow-[0_16px_30px_rgba(0,0,0,0.18)]",
+        isAssistant
+          ? "border-white/8 bg-white/[0.04] text-stone-100"
+          : "ml-auto border-emerald-200/12 bg-emerald-300/10 text-emerald-50",
+      )}
+    >
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.28em] text-stone-300">
+            {isAssistant ? "Grok" : "You"}
+          </p>
+          <p className="mt-1 font-['IBM_Plex_Mono'] text-[10px] text-stone-400">
+            {message.modelId ?? "local"} · {message.status}
+          </p>
+        </div>
+        {message.usage ? (
+          <p className="font-['IBM_Plex_Mono'] text-[10px] text-stone-400">
+            in {message.usage.inputTokens ?? 0} / out {message.usage.outputTokens ?? 0}
+          </p>
+        ) : null}
+      </div>
+
+      {isAssistant ? (
+        <div className="prose prose-invert prose-pre:rounded-xl prose-pre:border prose-pre:border-white/8 prose-pre:bg-black/40 prose-code:font-['IBM_Plex_Mono'] max-w-none text-[12px] leading-6">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              code({ className, children, ...props }) {
+                const language = className?.replace("language-", "");
+                const code = String(children ?? "").replace(/\n$/, "");
+                const inline = !className;
+                if (inline) {
+                  return (
+                    <code className={className} {...props}>
+                      {children}
+                    </code>
+                  );
+                }
+                return <CodeBlock code={code} language={language} />;
+              },
+            }}
+          >
+            {message.content || "…"}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        <p className="whitespace-pre-wrap text-[12px] leading-6">{message.content}</p>
+      )}
+
+      {message.error ? <p className="mt-3 text-[10px] text-rose-200">{message.error}</p> : null}
+    </article>
+  );
+}
+
+function CodeBlock({ code, language }: { code: string; language?: string }) {
+  const chrome = useContext(ShellChromeContext);
+  const label = (language ?? "code").toLowerCase();
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(code);
+  };
+
+  const handleDownload = () => {
+    const blob = new Blob([code], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `snippet.${extensionForLanguage(language)}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="my-4 overflow-hidden rounded-[18px] border border-white/8 bg-[#0a0d0f] shadow-[0_10px_30px_rgba(0,0,0,0.24)]">
+      <div className="flex items-center justify-between gap-3 border-b border-white/8 bg-white/[0.03] px-3 py-2">
+        <span className="font-['IBM_Plex_Mono'] text-[10px] uppercase tracking-[0.18em] text-stone-400">
+          {label}
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void handleCopy()}
+            className="inline-flex items-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1 text-[10px] text-stone-300 transition hover:bg-white/10"
+          >
+            <Copy className="h-3 w-3" />
+            Copy
+          </button>
+          <button
+            type="button"
+            onClick={handleDownload}
+            className="inline-flex items-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1 text-[10px] text-stone-300 transition hover:bg-white/10"
+          >
+            <Download className="h-3 w-3" />
+            Download
+          </button>
+          <button
+            type="button"
+            onClick={() => chrome?.openBrowserPreview(buildPreviewDocument(code, language))}
+            className="inline-flex items-center gap-1 rounded-lg border border-sky-300/18 bg-sky-300/10 px-2 py-1 text-[10px] text-sky-100 transition hover:bg-sky-300/16"
+          >
+            <Eye className="h-3 w-3" />
+            Preview
+          </button>
+        </div>
+      </div>
+      <pre className="m-0 overflow-x-auto px-4 py-4 font-['IBM_Plex_Mono'] text-[10px] leading-6 text-stone-200">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+function ImaginePage({ onShowBrowser }: { onShowBrowser: () => void }) {
+  const settings = useAppStore((state) => state.settings);
+  const mediaCategories = useAppStore((state) => state.mediaCategories);
+  const mediaAssets = useAppStore((state) => state.mediaAssets);
+  const generatingImage = useAppStore((state) => state.generatingImage);
+  const generatingVideo = useAppStore((state) => state.generatingVideo);
+  const createMediaCategory = useAppStore((state) => state.createMediaCategory);
+  const generateImage = useAppStore((state) => state.generateImage);
+  const generateVideo = useAppStore((state) => state.generateVideo);
+  const [mode, setMode] = useState<"image" | "video">("image");
+  const [mediaPrompt, setMediaPrompt] = useState("");
+  const [imageModel, setImageModel] = useState(settings?.xaiImageModel ?? IMAGE_MODELS[1]);
+  const [videoModel, setVideoModel] = useState(settings?.xaiVideoModel ?? VIDEO_MODELS[0]);
+  const [imageAspectRatio, setImageAspectRatio] = useState("1:1");
+  const [imageResolution, setImageResolution] = useState("1k");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [selectedVisualCategoryId, setSelectedVisualCategoryId] = useState<string>();
+  const [galleryDensity, setGalleryDensity] = useState<4 | 5 | 6>(5);
+
+  useEffect(() => {
+    if (settings?.xaiImageModel) {
+      setImageModel(settings.xaiImageModel);
+    }
+    if (settings?.xaiVideoModel) {
+      setVideoModel(settings.xaiVideoModel);
+    }
+  }, [settings?.xaiImageModel, settings?.xaiVideoModel]);
+
+  const visualAssets = useMemo(
+    () =>
+      mediaAssets.filter(
+        (asset) =>
+          asset.kind !== "audio" && (!selectedVisualCategoryId || asset.categoryId === selectedVisualCategoryId),
+      ),
+    [mediaAssets, selectedVisualCategoryId],
+  );
+  const visualCategoryCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        mediaCategories.map((category) => [
+          category.id,
+          mediaAssets.filter((asset) => asset.kind !== "audio" && asset.categoryId === category.id).length,
+        ]),
+      ),
+    [mediaAssets, mediaCategories],
+  );
+  const visualAllCount = useMemo(
+    () => mediaAssets.filter((asset) => asset.kind !== "audio").length,
+    [mediaAssets],
+  );
+
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="border-b border-white/6 px-3 py-2.5">
+        <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">Imagine</p>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-[18px] font-semibold text-stone-100">Generate Grok images and video</h2>
+            <p className="mt-1 text-[11px] text-stone-500">
+              Save every render into categories, then preview it inline or in the browser pane.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid min-h-0 flex-1 gap-3 overflow-hidden px-3 py-3 xl:grid-cols-[minmax(320px,0.72fr)_minmax(0,1.28fr)]">
+        <section className="min-h-0 overflow-y-auto rounded-[24px] border border-white/8 bg-white/[0.03] p-3.5">
+          <div className="flex items-start gap-3">
+            <div className="rounded-2xl border border-white/8 bg-white/5 p-2 text-stone-100">
+              {mode === "image" ? <ImagePlus className="h-4 w-4" /> : <Video className="h-4 w-4" />}
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Create</p>
+              <h3 className="mt-2 text-[14px] font-semibold text-stone-100">One prompt, two outputs</h3>
+              <p className="mt-1 text-[11px] leading-5 text-stone-500">
+                Switch between still image and video generation without losing your workspace.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => setMode("image")}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+                mode === "image"
+                  ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                  : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+              )}
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+              Image
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("video")}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+                mode === "video"
+                  ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                  : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+              )}
+            >
+              <Video className="h-3.5 w-3.5" />
+              Video
+            </button>
+          </div>
+
+          <div className="mt-3 grid gap-2">
+            <div className="grid gap-2">
+              <p className="text-[10px] uppercase tracking-[0.24em] text-stone-500">Model</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(mode === "image" ? IMAGE_MODELS : VIDEO_MODELS).map((modelId) => (
+                  <button
+                    key={modelId}
+                    type="button"
+                    onClick={() => (mode === "image" ? setImageModel(modelId) : setVideoModel(modelId))}
+                    className={clsx(
+                      "rounded-xl border px-3 py-2 text-[10px] font-['IBM_Plex_Mono'] transition",
+                      (mode === "image" ? imageModel : videoModel) === modelId
+                        ? mode === "image"
+                          ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                          : "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                        : "border-white/8 bg-black/30 text-stone-300 hover:bg-white/8",
+                    )}
+                  >
+                    {modelId}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {mode === "image" ? (
+              <>
+                <div className="grid gap-2">
+                  <p className="text-[10px] uppercase tracking-[0.24em] text-stone-500">Resolution</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {IMAGE_RESOLUTION_OPTIONS.map((resolution) => (
+                      <button
+                        key={resolution}
+                        type="button"
+                        onClick={() => setImageResolution(resolution)}
+                        className={clsx(
+                          "rounded-xl border px-3 py-2 text-[10px] font-['IBM_Plex_Mono'] transition",
+                          imageResolution === resolution
+                            ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                            : "border-white/8 bg-black/30 text-stone-300 hover:bg-white/8",
+                        )}
+                      >
+                        {resolution}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <p className="text-[10px] uppercase tracking-[0.24em] text-stone-500">Aspect Ratio</p>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    {IMAGE_ASPECT_OPTIONS.map((ratio) => (
+                      <button
+                        key={ratio}
+                        type="button"
+                        onClick={() => setImageAspectRatio(ratio)}
+                        className={clsx(
+                          "rounded-xl border px-3 py-2 text-[10px] font-['IBM_Plex_Mono'] transition",
+                          imageAspectRatio === ratio
+                            ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                            : "border-white/8 bg-black/30 text-stone-300 hover:bg-white/8",
+                        )}
+                      >
+                        {ratio}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : null}
+
+            <textarea
+              value={mediaPrompt}
+              onChange={(event) => setMediaPrompt(event.target.value)}
+              placeholder={
+                mode === "image"
+                  ? "Describe the image you want Grok to make…"
+                  : "Describe the motion, scene, and shot you want Grok to animate…"
+              }
+              className="min-h-40 rounded-[18px] border border-white/8 bg-black/30 px-3 py-3 text-[12px] leading-5 text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/30"
+            />
+            <button
+              type="button"
+              onClick={() =>
+                mode === "image"
+                  ? void generateImage(mediaPrompt, imageModel, imageAspectRatio, imageResolution, selectedVisualCategoryId)
+                  : void generateVideo(mediaPrompt, videoModel, selectedVisualCategoryId)
+              }
+              disabled={mode === "image" ? generatingImage : generatingVideo}
+              className={clsx(
+                "inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-stone-500",
+                mode === "image"
+                  ? "border border-emerald-300/20 bg-emerald-300/12 text-emerald-50 hover:bg-emerald-300/20"
+                  : "border border-sky-300/20 bg-sky-300/12 text-sky-50 hover:bg-sky-300/18",
+              )}
+            >
+              {mode === "image" ? <WandSparkles className="h-3.5 w-3.5" /> : <Video className="h-3.5 w-3.5" />}
+              {mode === "image"
+                ? generatingImage
+                  ? "Generating…"
+                  : "Generate Image"
+                : generatingVideo
+                  ? "Rendering…"
+                  : "Generate Video"}
+            </button>
+          </div>
+        </section>
+
+        <section className="grid min-h-0 overflow-hidden rounded-[24px] border border-white/8 bg-white/[0.025] xl:grid-cols-[200px_minmax(0,1fr)]">
+          <aside className="min-h-0 overflow-y-auto border-b border-white/6 px-3 py-3 xl:border-b-0 xl:border-r">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Categories</p>
+              <div className="hidden items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] p-0.5 xl:flex">
+                {[4, 5, 6].map((density) => (
+                  <button
+                    key={density}
+                    type="button"
+                    onClick={() => setGalleryDensity(density as 4 | 5 | 6)}
+                    className={clsx(
+                      "rounded-full px-2 py-0.5 text-[9px] transition",
+                      galleryDensity === density ? "bg-emerald-300/14 text-emerald-50" : "text-stone-400 hover:text-stone-100",
+                    )}
+                  >
+                    {density}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <input
+                value={newCategoryName}
+                onChange={(event) => setNewCategoryName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    if (newCategoryName.trim()) {
+                      void createMediaCategory(newCategoryName.trim());
+                      setNewCategoryName("");
+                    }
+                  }
+                }}
+                placeholder="New category"
+                className="min-w-0 flex-1 rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-[11px] text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/30"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (newCategoryName.trim()) {
+                    void createMediaCategory(newCategoryName.trim());
+                    setNewCategoryName("");
+                  }
+                }}
+                className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+              >
+                Add
+              </button>
+            </div>
+            <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedVisualCategoryId(undefined)}
+                className={clsx(
+                  "rounded-[14px] border px-3 py-2 text-left text-[11px] transition",
+                  !selectedVisualCategoryId
+                    ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                    : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+                )}
+              >
+                <span className="block truncate">All visuals</span>
+                <span className="mt-1 block text-[10px] text-stone-500">{visualAllCount} items</span>
+              </button>
+              {mediaCategories.map((category) => (
+                <button
+                  key={category.id}
+                  type="button"
+                  onClick={() => setSelectedVisualCategoryId(category.id)}
+                  className={clsx(
+                    "rounded-[14px] border px-3 py-2 text-left text-[11px] transition",
+                    category.id === selectedVisualCategoryId
+                      ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                      : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+                  )}
+                >
+                  <span className="block truncate">{category.name}</span>
+                  <span className="mt-1 block text-[10px] text-stone-500">{visualCategoryCounts[category.id] ?? 0} items</span>
+                </button>
+              ))}
+            </div>
+          </aside>
+          <div
+            className="grid min-h-0 flex-1 content-start gap-3 overflow-y-auto p-3"
+            style={{ gridTemplateColumns: `repeat(${galleryDensity}, minmax(0, 1fr))` }}
+          >
+            {generatingVideo ? <GeneratingMediaCard prompt={mediaPrompt} /> : null}
+            {visualAssets.length ? (
+              visualAssets.map((asset) => (
+                <MediaAssetCard key={asset.id} asset={asset} onShowBrowser={onShowBrowser} />
+              ))
+            ) : (
+              <div className="col-[1/-1]">
+                <EmptyPanel
+                  eyebrow="Gallery"
+                  title="Your generated media will land here."
+                  body="Images, videos, and speech outputs are stored locally and organized by your chosen category."
+                />
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function GeneratingMediaCard({ prompt }: { prompt: string }) {
+  return (
+    <article className="overflow-hidden rounded-[20px] border border-sky-300/18 bg-[#0b0d0f] shadow-[0_18px_60px_rgba(8,47,73,0.24)]">
+      <div className="relative aspect-[4/3] overflow-hidden bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.18),rgba(3,7,18,0.96)_60%)]">
+        <div className="absolute inset-0 bg-[linear-gradient(120deg,transparent_18%,rgba(255,255,255,0.08)_50%,transparent_82%)] animate-pulse" />
+        <div className="absolute inset-x-0 top-0 h-1 bg-[linear-gradient(90deg,rgba(56,189,248,0.1),rgba(125,211,252,0.9),rgba(56,189,248,0.1))] animate-pulse" />
+        <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full border border-sky-300/24 bg-sky-300/12 text-sky-100 shadow-[0_0_0_14px_rgba(56,189,248,0.08)]">
+            <Video className="h-6 w-6 animate-pulse" />
+          </div>
+          <div className="flex items-end gap-1">
+            <span className="h-3 w-1 rounded-full bg-sky-200/70 animate-pulse" />
+            <span className="h-5 w-1 rounded-full bg-sky-200/90 animate-pulse [animation-delay:120ms]" />
+            <span className="h-7 w-1 rounded-full bg-sky-100 animate-pulse [animation-delay:240ms]" />
+            <span className="h-5 w-1 rounded-full bg-sky-200/90 animate-pulse [animation-delay:360ms]" />
+            <span className="h-3 w-1 rounded-full bg-sky-200/70 animate-pulse [animation-delay:480ms]" />
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.28em] text-sky-100/80">Rendering</p>
+            <p className="mt-2 text-[12px] font-semibold text-stone-100">Grok is processing your video</p>
+            <p className="mt-2 line-clamp-3 text-[11px] leading-5 text-stone-400">
+              {prompt.trim() || "Your current video prompt will appear here while the render finishes."}
+            </p>
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t border-white/8 px-3 py-3">
+        <div className="rounded-full border border-sky-300/16 bg-sky-300/10 px-2 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-sky-100">
+          In progress
+        </div>
+        <div className="font-['IBM_Plex_Mono'] text-[9px] text-stone-500">Waiting for final asset</div>
+      </div>
+    </article>
+  );
+}
+
+function MediaAssetCard({ asset, onShowBrowser }: { asset: MediaAsset; onShowBrowser: () => void }) {
+  const chrome = useContext(ShellChromeContext);
+  const mediaCategories = useAppStore((state) => state.mediaCategories);
+  const moveMediaAssetToCategory = useAppStore((state) => state.moveMediaAssetToCategory);
+  const renameMediaAsset = useAppStore((state) => state.renameMediaAsset);
+  const deleteMediaAsset = useAppStore((state) => state.deleteMediaAsset);
+  const [src, setSrc] = useState<string>();
+  const [titleDraft, setTitleDraft] = useState(asset.prompt);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .readMediaDataUrl(asset.filePath)
+      .then((value) => {
+        if (!cancelled) {
+          setSrc(value);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSrc(undefined);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset.filePath]);
+
+  useEffect(() => {
+    setTitleDraft(asset.prompt);
+  }, [asset.prompt]);
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(asset.filePath);
+  };
+
+  const handleDownload = () => {
+    if (!src) {
+      return;
+    }
+    const anchor = document.createElement("a");
+    anchor.href = src;
+    anchor.download = leafName(asset.filePath);
+    anchor.click();
+  };
+
+  return (
+    <article className="group relative aspect-square overflow-visible">
+      <div className="flex h-full flex-col overflow-hidden rounded-[20px] border border-white/8 bg-[linear-gradient(180deg,rgba(11,13,15,0.98),rgba(8,9,11,0.96))] shadow-[0_14px_34px_rgba(0,0,0,0.22)] transition duration-200 group-hover:border-white/12 group-hover:shadow-[0_18px_42px_rgba(0,0,0,0.3)]">
+        <div className="relative flex-1 overflow-hidden bg-black">
+          {asset.kind === "audio" ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),rgba(3,7,18,0.96)_62%)] p-4 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full border border-emerald-300/18 bg-emerald-300/10 text-emerald-100">
+                <AudioLines className="h-5 w-5" />
+              </div>
+              <p className="line-clamp-2 text-[10px] leading-5 text-stone-200">{asset.prompt}</p>
+            </div>
+          ) : !src ? (
+            <div className="flex h-full items-center justify-center text-[11px] text-stone-500">Loading preview…</div>
+          ) : asset.kind === "image" ? (
+            <img src={src} alt={asset.prompt} className="h-full w-full object-cover" />
+          ) : (
+            <video src={src} className="h-full w-full object-cover" muted playsInline />
+          )}
+
+          <div className="absolute inset-x-0 bottom-0 bg-[linear-gradient(180deg,transparent,rgba(3,7,18,0.9))] px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-300">
+                {asset.kind}
+              </span>
+              <span className="font-['IBM_Plex_Mono'] text-[9px] text-stone-400">{leafName(asset.filePath)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-white/6 px-2.5 py-2">
+          <p className="line-clamp-2 text-[10px] leading-5 text-stone-200">{asset.prompt}</p>
+        </div>
+      </div>
+
+      <div className="pointer-events-none absolute left-1/2 top-1/2 z-20 w-[min(320px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 opacity-0 transition duration-200 ease-out md:scale-[0.94] md:group-hover:pointer-events-auto md:group-hover:scale-100 md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:scale-100 md:group-focus-within:opacity-100">
+        <div className="flex flex-col overflow-hidden rounded-[24px] border border-white/10 bg-[#0b0d0f] p-2 shadow-[0_24px_64px_rgba(0,0,0,0.45)]">
+          <div className="overflow-hidden rounded-[18px] border border-white/8 bg-black">
+            <div className="aspect-[4/3] bg-black">
+              {asset.kind === "audio" ? (
+                <div className="flex h-full flex-col items-center justify-center gap-4 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),rgba(3,7,18,0.96)_62%)] p-4 text-center">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full border border-emerald-300/20 bg-emerald-300/10 text-emerald-100">
+                    <AudioLines className="h-6 w-6" />
+                  </div>
+                  {src ? <audio src={src} controls className="w-full" /> : <p className="text-[10px] text-stone-500">Loading audio…</p>}
+                </div>
+              ) : !src ? (
+                <div className="flex h-full items-center justify-center text-[11px] text-stone-500">Loading preview…</div>
+              ) : asset.kind === "image" ? (
+                <img src={src} alt={asset.prompt} className="h-full w-full object-cover" />
+              ) : (
+                <video src={src} controls className="h-full w-full object-cover" />
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2.5 px-1 pb-1 pt-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="rounded-full border border-white/8 bg-white/5 px-2 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-400">
+                {asset.kind}
+              </p>
+              <p className="font-['IBM_Plex_Mono'] text-[9px] text-stone-500">{asset.modelId}</p>
+            </div>
+
+            {asset.kind === "audio" ? (
+              <div className="grid gap-2">
+                <input
+                  value={titleDraft}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  placeholder="Clip name"
+                  className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-[11px] text-stone-100 outline-none focus:border-emerald-300/35"
+                />
+                <button
+                  type="button"
+                  onClick={() => void renameMediaAsset(asset.id, titleDraft)}
+                  className="inline-flex items-center justify-center gap-1 rounded-xl border border-emerald-300/18 bg-emerald-300/10 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/16"
+                >
+                  <Save className="h-3 w-3" />
+                  Save Name
+                </button>
+              </div>
+            ) : (
+              <p className="line-clamp-2 text-[10px] leading-5 text-stone-200">{asset.prompt}</p>
+            )}
+
+            <label className="block space-y-1.5 text-[10px] text-stone-400">
+              <span className="uppercase tracking-[0.2em]">Category</span>
+              <select
+                value={asset.categoryId ?? ""}
+                onChange={(event) => void moveMediaAssetToCategory(asset.id, event.target.value || undefined)}
+                className="w-full rounded-xl border border-white/8 bg-black/35 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-sky-300/35"
+              >
+                <option value="">Unsorted</option>
+                {mediaCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (src) {
+                    chrome?.openBrowserPreview(buildAssetPreviewDocument(asset, src));
+                    onShowBrowser();
+                  }
+                }}
+                className="inline-flex items-center justify-center gap-1 rounded-lg border border-sky-300/18 bg-sky-300/10 px-2 py-1.5 text-[10px] text-sky-100 transition hover:bg-sky-300/16"
+              >
+                <Eye className="h-3 w-3" />
+                Preview
+              </button>
+              <button
+                type="button"
+                onClick={() => chrome?.openEditorAsset(asset)}
+                className="inline-flex items-center justify-center gap-1 rounded-lg border border-amber-300/18 bg-amber-300/10 px-2 py-1.5 text-[10px] text-amber-50 transition hover:bg-amber-300/16"
+              >
+                <Video className="h-3 w-3" />
+                Editor
+              </button>
+              <button
+                type="button"
+                onClick={handleDownload}
+                className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-white/10"
+              >
+                <Download className="h-3 w-3" />
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopy()}
+                className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-white/10"
+              >
+                <Copy className="h-3 w-3" />
+                Path
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm(`Delete this ${asset.kind} asset?`)) {
+                    void deleteMediaAsset(asset.id);
+                  }
+                }}
+                className="col-span-2 inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-rose-500/15"
+              >
+                <Trash2 className="h-3 w-3" />
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function VoiceAudioPage({ onShowBrowser }: { onShowBrowser: () => void }) {
+  const settings = useAppStore((state) => state.settings);
+  const mediaCategories = useAppStore((state) => state.mediaCategories);
+  const mediaAssets = useAppStore((state) => state.mediaAssets);
+  const createMediaCategory = useAppStore((state) => state.createMediaCategory);
+  const generatingSpeech = useAppStore((state) => state.generatingSpeech);
+  const createRealtimeSession = useAppStore((state) => state.createRealtimeSession);
+  const clearRealtimeSession = useAppStore((state) => state.clearRealtimeSession);
+  const generatingRealtimeSession = useAppStore((state) => state.creatingRealtimeSession);
+  const realtimeSession = useAppStore((state) => state.realtimeSession);
+  const generateSpeech = useAppStore((state) => state.generateSpeech);
+  const [mode, setMode] = useState<"speech" | "realtime">("speech");
+  const [speechInput, setSpeechInput] = useState("");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [selectedAudioCategoryId, setSelectedAudioCategoryId] = useState<string>();
+  const [galleryDensity, setGalleryDensity] = useState<4 | 5 | 6>(6);
+  const [voiceName, setVoiceName] = useState(normalizeVoiceId(settings?.xaiVoiceName));
+  const [ttsModel, setTtsModel] = useState(settings?.xaiTtsModel ?? "xai-tts");
+  const [realtimeModel, setRealtimeModel] = useState(settings?.xaiRealtimeModel ?? "grok-realtime");
+  const [realtimeInstructions, setRealtimeInstructions] = useState(
+    "You are Grok Voice inside Grok Desktop. Keep responses concise and useful.",
+  );
+  const [realtimeStatus, setRealtimeStatus] = useState("Idle");
+  const [voiceActive, setVoiceActive] = useState(false);
+  const websocketRef = useRef<WebSocket | null>(null);
+  const captureContextRef = useRef<AudioContext | null>(null);
+  const playbackContextRef = useRef<AudioContext | null>(null);
+  const playbackCursorRef = useRef(0);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
+  const partialAssistantTranscriptRef = useRef("");
+
+  useEffect(() => {
+    if (settings?.xaiVoiceName) {
+      setVoiceName(normalizeVoiceId(settings.xaiVoiceName));
+    }
+    if (settings?.xaiTtsModel) {
+      setTtsModel(settings.xaiTtsModel);
+    }
+    if (settings?.xaiRealtimeModel) {
+      setRealtimeModel(settings.xaiRealtimeModel);
+    }
+  }, [settings?.xaiRealtimeModel, settings?.xaiTtsModel, settings?.xaiVoiceName]);
+
+  const audioAssets = useMemo(
+    () =>
+      mediaAssets.filter(
+        (asset) => asset.kind === "audio" && (!selectedAudioCategoryId || asset.categoryId === selectedAudioCategoryId),
+      ),
+    [mediaAssets, selectedAudioCategoryId],
+  );
+  const audioCategoryCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        mediaCategories.map((category) => [
+          category.id,
+          mediaAssets.filter((asset) => asset.kind === "audio" && asset.categoryId === category.id).length,
+        ]),
+      ),
+    [mediaAssets, mediaCategories],
+  );
+  const audioAllCount = useMemo(() => mediaAssets.filter((asset) => asset.kind === "audio").length, [mediaAssets]);
+
+  const stopRealtimeConversation = async () => {
+    processorNodeRef.current?.disconnect();
+    processorNodeRef.current = null;
+    sourceNodeRef.current?.disconnect();
+    sourceNodeRef.current = null;
+    silentGainRef.current?.disconnect();
+    silentGainRef.current = null;
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    if (captureContextRef.current) {
+      await captureContextRef.current.close().catch(() => undefined);
+      captureContextRef.current = null;
+    }
+    if (playbackContextRef.current) {
+      await playbackContextRef.current.close().catch(() => undefined);
+      playbackContextRef.current = null;
+      playbackCursorRef.current = 0;
+    }
+    websocketRef.current?.close();
+    websocketRef.current = null;
+    partialAssistantTranscriptRef.current = "";
+    clearRealtimeSession();
+    setVoiceActive(false);
+    setRealtimeStatus("Idle");
+  };
+
+  useEffect(() => {
+    return () => {
+      void stopRealtimeConversation();
+    };
+  }, []);
+
+  const queueAssistantAudio = async (base64Audio: string) => {
+    const bytes = decodeBase64Bytes(base64Audio);
+    const samples = pcm16BytesToFloat32(bytes);
+    if (!samples.length) {
+      return;
+    }
+
+    let context = playbackContextRef.current;
+    if (!context) {
+      context = new AudioContext({ sampleRate: REALTIME_AUDIO_RATE });
+      playbackContextRef.current = context;
+    }
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+
+    const buffer = context.createBuffer(1, samples.length, REALTIME_AUDIO_RATE);
+    buffer.copyToChannel(samples, 0);
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(context.destination);
+
+    const startAt = Math.max(context.currentTime + 0.02, playbackCursorRef.current || context.currentTime);
+    source.start(startAt);
+    playbackCursorRef.current = startAt + buffer.duration;
+  };
+
+  const startRealtimeConversation = async () => {
+    if (voiceActive || generatingRealtimeSession) {
+      return;
+    }
+
+    setRealtimeStatus("Starting");
+    setVoiceActive(true);
+
+    try {
+      await createRealtimeSession(realtimeModel, normalizeVoiceId(voiceName), realtimeInstructions);
+      const session = useAppStore.getState().realtimeSession ?? realtimeSession;
+      if (!session) {
+        throw new Error("Realtime session was not created.");
+      }
+
+      const socket = new WebSocket(session.websocketUrl, [`xai-client-secret.${session.clientSecret}`]);
+      websocketRef.current = socket;
+
+      socket.onopen = async () => {
+        setRealtimeStatus("Listening");
+        socket.send(
+          JSON.stringify({
+            type: "session.update",
+            session: {
+              model: realtimeModel,
+              instructions: realtimeInstructions,
+              voice: normalizeVoiceId(voiceName),
+              turn_detection: { type: "server_vad" },
+              audio: {
+                input: { format: { type: "audio/pcm", rate: REALTIME_AUDIO_RATE } },
+                output: { format: { type: "audio/pcm", rate: REALTIME_AUDIO_RATE } },
+              },
+            },
+          }),
+        );
+
+        const captureContext = new AudioContext({ sampleRate: REALTIME_AUDIO_RATE });
+        captureContextRef.current = captureContext;
+        if (captureContext.state === "suspended") {
+          await captureContext.resume();
+        }
+
+        const stream = await requestMicrophoneStream();
+        mediaStreamRef.current = stream;
+
+        const source = captureContext.createMediaStreamSource(stream);
+        const processor = captureContext.createScriptProcessor(4096, 1, 1);
+        const silentGain = captureContext.createGain();
+        silentGain.gain.value = 0;
+
+        source.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(captureContext.destination);
+
+        sourceNodeRef.current = source;
+        processorNodeRef.current = processor;
+        silentGainRef.current = silentGain;
+
+        processor.onaudioprocess = (event) => {
+          if (socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          const channelData = event.inputBuffer.getChannelData(0);
+          socket.send(
+            JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: encodePcm16Base64(channelData),
+            }),
+          );
+        };
+      };
+
+      socket.onmessage = (event) => {
+        const payload = typeof event.data === "string" ? event.data : "";
+        if (!payload) {
+          return;
+        }
+
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(payload) as Record<string, unknown>;
+        } catch {
+          return;
+        }
+
+        const type = typeof data.type === "string" ? data.type : "";
+        if (type === "session.updated") {
+          setRealtimeStatus("Listening");
+          return;
+        }
+        if (type === "input_audio_buffer.speech_started") {
+          setRealtimeStatus("Listening");
+          return;
+        }
+        if (type === "input_audio_buffer.speech_stopped") {
+          setRealtimeStatus("Thinking");
+          return;
+        }
+        if (type === "response.created") {
+          partialAssistantTranscriptRef.current = "";
+          setRealtimeStatus("Responding");
+          return;
+        }
+        if (type === "response.output_audio_transcript.delta") {
+          partialAssistantTranscriptRef.current += typeof data.delta === "string" ? data.delta : "";
+          return;
+        }
+        if (type === "response.output_audio_transcript.done") {
+          partialAssistantTranscriptRef.current = "";
+          return;
+        }
+        if (type === "response.output_audio.delta") {
+          const delta = typeof data.delta === "string" ? data.delta : "";
+          if (delta) {
+            void queueAssistantAudio(delta);
+          }
+          return;
+        }
+        if (type === "response.done") {
+          setRealtimeStatus("Listening");
+          return;
+        }
+        if (type === "error") {
+          const message =
+            typeof data.error === "string"
+              ? data.error
+              : typeof (data.error as Record<string, unknown> | undefined)?.message === "string"
+                ? ((data.error as Record<string, unknown>).message as string)
+                : "Realtime session error.";
+          setRealtimeStatus(message);
+        }
+      };
+
+      socket.onerror = () => {
+        setRealtimeStatus("Realtime websocket error");
+      };
+
+      socket.onclose = () => {
+        setVoiceActive(false);
+        setRealtimeStatus("Idle");
+      };
+    } catch (error) {
+      setVoiceActive(false);
+      setRealtimeStatus(
+        error instanceof Error
+          ? error.message
+          : "Failed to start realtime voice.",
+      );
+    }
+  };
+
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="border-b border-white/6 px-3 py-3">
+        <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">Voice & Audio</p>
+        <h2 className="mt-2 text-[18px] font-semibold text-stone-100">Speech files and live Grok voice</h2>
+        <p className="mt-1 text-[11px] text-stone-500">
+          Switch between file generation and a live back-and-forth realtime voice session from one panel.
+        </p>
+      </div>
+
+      <div className="grid min-h-0 flex-1 gap-3 overflow-hidden px-3 py-3 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
+        <section className="min-h-0 overflow-y-auto rounded-[24px] border border-white/8 bg-white/[0.03] p-3.5">
+          <div className="flex items-start gap-3">
+            <div className="rounded-2xl border border-white/8 bg-white/5 p-2 text-stone-100">
+              {mode === "speech" ? <Volume2 className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Voice</p>
+              <h3 className="mt-2 text-[14px] font-semibold text-stone-100">One panel for files and live chat</h3>
+              <p className="mt-1 text-[11px] leading-5 text-stone-500">
+                Generate a saved speech file or switch to a live realtime session with a single voice button.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 flex gap-2">
+            <button
+              type="button"
+              onClick={() => setMode("speech")}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+                mode === "speech"
+                  ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                  : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+              )}
+            >
+              <AudioLines className="h-3.5 w-3.5" />
+              Speech File
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("realtime")}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+                mode === "realtime"
+                  ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                  : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+              )}
+            >
+              <Wifi className="h-3.5 w-3.5" />
+              Realtime Voice
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-2">
+            <input
+              value={mode === "speech" ? ttsModel : realtimeModel}
+              onChange={(event) => (mode === "speech" ? setTtsModel(event.target.value) : setRealtimeModel(event.target.value))}
+              placeholder={mode === "speech" ? "TTS model id" : "Realtime model id"}
+              className="rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-200 outline-none focus:border-sky-300/40"
+            />
+            <select
+              value={normalizeVoiceId(voiceName)}
+              onChange={(event) => setVoiceName(event.target.value)}
+              className="rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-200 outline-none focus:border-sky-300/40"
+            >
+              {XAI_VOICE_OPTIONS.map((voice) => (
+                <option key={voice.id} value={voice.id}>
+                  {voice.label}
+                </option>
+              ))}
+            </select>
+
+            {mode === "speech" ? (
+              <>
+                <textarea
+                  value={speechInput}
+                  onChange={(event) => setSpeechInput(event.target.value)}
+                  placeholder="Type the text you want Grok to speak…"
+                  className="min-h-36 rounded-[18px] border border-white/8 bg-black/30 px-3 py-3 text-[12px] leading-5 text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/30"
+                />
+                <button
+                  type="button"
+                  onClick={() => void generateSpeech(speechInput, ttsModel, normalizeVoiceId(voiceName), "mp3", selectedAudioCategoryId)}
+                  disabled={generatingSpeech}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] font-semibold text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-stone-500"
+                >
+                  <AudioLines className="h-3.5 w-3.5" />
+                  {generatingSpeech ? "Synthesizing…" : "Generate Speech"}
+                </button>
+              </>
+            ) : (
+              <>
+                <textarea
+                  value={realtimeInstructions}
+                  onChange={(event) => setRealtimeInstructions(event.target.value)}
+                  placeholder="Realtime instructions"
+                  className="min-h-24 rounded-[18px] border border-white/8 bg-black/30 px-3 py-3 text-[11px] leading-5 text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/30"
+                />
+                <div className="rounded-[22px] border border-white/8 bg-black/30 px-4 py-5">
+                  <div className="flex flex-col items-center text-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (voiceActive) {
+                          void stopRealtimeConversation();
+                        } else {
+                          void startRealtimeConversation();
+                        }
+                      }}
+                      disabled={generatingRealtimeSession}
+                      className={clsx(
+                        "flex h-28 w-28 items-center justify-center rounded-full border transition",
+                        voiceActive
+                          ? "border-rose-300/30 bg-rose-400/15 text-rose-50 shadow-[0_0_0_10px_rgba(251,113,133,0.08)]"
+                          : "border-sky-300/24 bg-sky-300/12 text-sky-50 shadow-[0_0_0_10px_rgba(56,189,248,0.08)] hover:bg-sky-300/18",
+                      )}
+                    >
+                      <Mic className="h-9 w-9" />
+                    </button>
+                    <p className="mt-4 text-[12px] font-semibold text-stone-100">
+                      {voiceActive ? "Tap to end live voice" : "Tap to start live voice"}
+                    </p>
+                    <p className="mt-1 text-[11px] text-stone-500">
+                      {generatingRealtimeSession ? "Creating secure session…" : `Status: ${realtimeStatus}`}
+                    </p>
+                    {realtimeSession?.expiresAt ? (
+                      <p className="mt-1 font-['IBM_Plex_Mono'] text-[10px] text-stone-600">
+                        expires {realtimeSession.expiresAt}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+
+        <section className="min-h-0 overflow-hidden rounded-[24px] border border-white/8 bg-white/[0.03]">
+          <div className="grid h-full min-h-0 overflow-hidden xl:grid-cols-[220px_minmax(0,1fr)]">
+            <aside className="min-h-0 overflow-y-auto border-b border-white/6 px-3 py-3 xl:border-b-0 xl:border-r">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Audio Categories</p>
+                <div className="hidden items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] p-0.5 xl:flex">
+                  {[4, 5, 6].map((density) => (
+                    <button
+                      key={density}
+                      type="button"
+                      onClick={() => setGalleryDensity(density as 4 | 5 | 6)}
+                      className={clsx(
+                        "rounded-full px-2 py-0.5 text-[9px] transition",
+                        galleryDensity === density ? "bg-emerald-300/14 text-emerald-50" : "text-stone-400 hover:text-stone-100",
+                      )}
+                    >
+                      {density}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <input
+                  value={newCategoryName}
+                  onChange={(event) => setNewCategoryName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && newCategoryName.trim()) {
+                      event.preventDefault();
+                      void createMediaCategory(newCategoryName.trim());
+                      setNewCategoryName("");
+                    }
+                  }}
+                  placeholder="New category"
+                  className="min-w-0 flex-1 rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-[11px] text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/30"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (newCategoryName.trim()) {
+                      void createMediaCategory(newCategoryName.trim());
+                      setNewCategoryName("");
+                    }
+                  }}
+                  className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+                >
+                  Add
+                </button>
+              </div>
+              <div className="mt-4 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedAudioCategoryId(undefined)}
+                  className={clsx(
+                    "rounded-[14px] border px-3 py-2 text-left text-[11px] transition",
+                    !selectedAudioCategoryId
+                      ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                      : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+                  )}
+                >
+                  <span className="block truncate">All audio</span>
+                  <span className="mt-1 block text-[10px] text-stone-500">{audioAllCount} items</span>
+                </button>
+                {mediaCategories.map((category) => (
+                  <button
+                    key={category.id}
+                    type="button"
+                    onClick={() => setSelectedAudioCategoryId(category.id)}
+                    className={clsx(
+                      "rounded-[14px] border px-3 py-2 text-left text-[11px] transition",
+                      category.id === selectedAudioCategoryId
+                        ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                        : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+                    )}
+                  >
+                    <span className="block truncate">{category.name}</span>
+                    <span className="mt-1 block text-[10px] text-stone-500">{audioCategoryCounts[category.id] ?? 0} items</span>
+                  </button>
+                ))}
+              </div>
+            </aside>
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="border-b border-white/6 px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Audio Gallery</p>
+                    <p className="mt-1 text-[11px] text-stone-500">Compact audio tiles with hover controls</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onShowBrowser}
+                    className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+                  >
+                    Open Browser Pane
+                  </button>
+                </div>
+              </div>
+              <div
+                className="grid min-h-0 flex-1 content-start gap-3 overflow-y-auto p-4"
+                style={{ gridTemplateColumns: `repeat(${galleryDensity}, minmax(0, 1fr))` }}
+              >
+                {audioAssets.length ? (
+                  audioAssets.map((asset) => <MediaAssetCard key={asset.id} asset={asset} onShowBrowser={onShowBrowser} />)
+                ) : (
+                  <div className="col-[1/-1]">
+                    <EmptyPanel
+                      eyebrow="Audio"
+                      title="Speech files will appear here."
+                      body="Generate a TTS clip and Grok Desktop will keep it in the audio gallery without mixing it into the visual gallery."
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function IdePage({ onShowBrowser }: { onShowBrowser: () => void }) {
+  const chrome = useContext(ShellChromeContext);
+  const settings = useAppStore((state) => state.settings);
+  const workspaces = useAppStore((state) => state.workspaces);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const workspaceItemsMap = useAppStore((state) => state.workspaceItems);
+  const scanningWorkspaceId = useAppStore((state) => state.scanningWorkspaceId);
+  const selectWorkspace = useAppStore((state) => state.selectWorkspace);
+  const scanWorkspace = useAppStore((state) => state.scanWorkspace);
+  const createWorkspaceFromFolder = useAppStore((state) => state.createWorkspaceFromFolder);
+  const deleteWorkspace = useAppStore((state) => state.deleteWorkspace);
+  const browserDraftUrl = useAppStore((state) => state.browserDraftUrl);
+  const detectedServerUrl = useAppStore((state) => state.detectedServerUrl);
+  const setBrowserDraftUrl = useAppStore((state) => state.setBrowserDraftUrl);
+  const openBrowserUrl = useAppStore((state) => state.openBrowserUrl);
+  const [leftMode, setLeftMode] = useState<"explorer" | "workspace" | "browser">("explorer");
+  const [query, setQuery] = useState("");
+  const [activeFilePath, setActiveFilePath] = useState<string>();
+  const [fileContent, setFileContent] = useState("");
+  const [savedContent, setSavedContent] = useState("");
+  const [loadingFile, setLoadingFile] = useState(false);
+  const [savingFile, setSavingFile] = useState(false);
+  const [previewMode, setPreviewMode] = useState<"code" | "preview">("code");
+  const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
+  const [assistantModel, setAssistantModel] = useState(settings?.xaiModel ?? "grok-code-fast-1");
+  const [assistantComposer, setAssistantComposer] = useState("");
+  const [assistantConversationId, setAssistantConversationId] = useState<string>();
+  const [assistantSending, setAssistantSending] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState<
+    Array<{ id: string; role: "user" | "assistant"; content: string; status: string }>
+  >([]);
+  const [contextMenu, setContextMenu] = useState<IdeContextMenuState>();
+  const [ideLeftWidth, setIdeLeftWidth] = useState(240);
+  const [ideRightWidth, setIdeRightWidth] = useState(340);
+  const [ideViewportWidth, setIdeViewportWidth] = useState(() => window.innerWidth);
+  const [ideDragPane, setIdeDragPane] = useState<{ side: "left" | "right"; startX: number; startValue: number }>();
+
+  const workspaceItems = activeWorkspaceId ? workspaceItemsMap[activeWorkspaceId] ?? [] : [];
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+  const filteredItems = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return workspaceItems;
+    }
+    return workspaceItems.filter((item) => item.path.toLowerCase().includes(normalizedQuery));
+  }, [query, workspaceItems]);
+  const visibleTreeItems = query.trim() ? filteredItems : workspaceItems;
+  const tree = useMemo(
+    () => buildIdeTree(visibleTreeItems, activeWorkspace?.roots ?? []),
+    [activeWorkspace?.roots, visibleTreeItems],
+  );
+  const activeItem =
+    workspaceItems.find((item) => item.path === activeFilePath) ??
+    filteredItems.find((item) => item.path === activeFilePath);
+  const dirty = fileContent !== savedContent;
+  const clampedIdeLeftWidth = clamp(ideLeftWidth, 210, Math.max(210, Math.floor(ideViewportWidth * 0.34)));
+  const clampedIdeRightWidth = clamp(ideRightWidth, 280, Math.max(280, Math.floor(ideViewportWidth * 0.36)));
+
+  useEffect(() => {
+    if (settings?.xaiModel) {
+      setAssistantModel(settings.xaiModel);
+    }
+  }, [settings?.xaiModel]);
+
+  useEffect(() => {
+    const onResize = () => setIdeViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!ideDragPane) {
+      return undefined;
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (ideDragPane.side === "left") {
+        setIdeLeftWidth(ideDragPane.startValue + (event.clientX - ideDragPane.startX));
+        return;
+      }
+      setIdeRightWidth(ideDragPane.startValue - (event.clientX - ideDragPane.startX));
+    };
+
+    const onPointerUp = () => setIdeDragPane(undefined);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [ideDragPane]);
+
+  useEffect(() => {
+    setQuery("");
+    setOpenFolders({});
+    setContextMenu(undefined);
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!filteredItems.length) {
+      setActiveFilePath(undefined);
+      setFileContent("");
+      setSavedContent("");
+      return;
+    }
+    if (!activeFilePath || !workspaceItems.some((item) => item.path === activeFilePath)) {
+      setActiveFilePath(filteredItems[0]?.path);
+    }
+  }, [activeFilePath, filteredItems, workspaceItems]);
+
+  useEffect(() => {
+    if (!tree.length) {
+      return;
+    }
+    setOpenFolders((current) => {
+      const next = { ...current };
+      tree.forEach((node) => {
+        if (next[node.id] == null) {
+          next[node.id] = true;
+        }
+      });
+      return next;
+    });
+  }, [tree]);
+
+  useEffect(() => {
+    if (!activeFilePath) {
+      return;
+    }
+    let cancelled = false;
+    setLoadingFile(true);
+    void api
+      .readWorkspaceTextFile(activeFilePath)
+      .then((content) => {
+        if (!cancelled) {
+          setFileContent(content);
+          setSavedContent(content);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFileContent("");
+          setSavedContent("");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingFile(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeFilePath]);
+
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    void events.onStream((event: StreamEvent) => {
+      setAssistantMessages((current) =>
+        current.map((message) => {
+          if (message.id !== event.messageId) {
+            return message;
+          }
+          if (event.kind === "delta") {
+            return {
+              ...message,
+              content: `${message.content}${event.textDelta ?? ""}`,
+              status: "streaming",
+            };
+          }
+          if (event.kind === "completed") {
+            return { ...message, status: "complete" };
+          }
+          if (event.kind === "cancelled") {
+            return { ...message, status: "cancelled" };
+          }
+          if (event.kind === "error") {
+            return { ...message, status: "error", content: event.error ?? message.content };
+          }
+          return message;
+        }),
+      );
+      if (event.kind === "completed" || event.kind === "cancelled" || event.kind === "error") {
+        setAssistantSending(false);
+      }
+    }).then((unlisten: () => void) => {
+      dispose = unlisten;
+    });
+
+    return () => dispose?.();
+  }, []);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+
+    const dismiss = () => setContextMenu(undefined);
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [contextMenu]);
+
+  const handleSelectFile = (path: string) => {
+    if (dirty && path !== activeFilePath && !window.confirm("Discard unsaved IDE changes?")) {
+      return;
+    }
+    setActiveFilePath(path);
+  };
+
+  const handleSave = async () => {
+    if (!activeFilePath) {
+      return;
+    }
+    setSavingFile(true);
+    try {
+      await api.writeWorkspaceTextFile(activeFilePath, fileContent);
+      setSavedContent(fileContent);
+      if (activeWorkspaceId) {
+        await selectWorkspace(activeWorkspaceId);
+      }
+    } finally {
+      setSavingFile(false);
+    }
+  };
+
+  const refreshWorkspaceAfterMutation = async (
+    workspaceId: string,
+    nextActivePath?: string,
+    roots?: string[],
+  ) => {
+    if (roots) {
+      await api.updateWorkspace(workspaceId, { roots });
+    }
+    await scanWorkspace(workspaceId);
+    await selectWorkspace(workspaceId);
+    setActiveFilePath(nextActivePath);
+  };
+
+  const handleCreateFile = async (node: IdeTreeNode) => {
+    if (node.kind !== "folder" || !activeWorkspaceId) {
+      return;
+    }
+
+    if (dirty && !window.confirm("Discard unsaved IDE changes and create a new file here?")) {
+      return;
+    }
+
+    const nextName = window.prompt("New file name", "new-file.ts")?.trim();
+    if (!nextName) {
+      return;
+    }
+    if (nextName.includes("/") || nextName.includes("\\")) {
+      window.alert("Use a file name only, not a full path.");
+      return;
+    }
+
+    const nextPath = `${node.path.replace(/\/+$/, "")}/${nextName}`;
+    await api.createWorkspaceTextFile(nextPath, "");
+    setOpenFolders((current) => ({ ...current, [node.id]: true }));
+    setPreviewMode("code");
+    setFileContent("");
+    setSavedContent("");
+    await refreshWorkspaceAfterMutation(activeWorkspaceId, nextPath);
+  };
+
+  const handleRenameNode = async (node: IdeTreeNode) => {
+    if (!activeWorkspaceId || !activeWorkspace) {
+      return;
+    }
+
+    const nextName = window.prompt(`Rename ${node.kind}`, node.name)?.trim();
+    if (!nextName || nextName === node.name) {
+      return;
+    }
+
+    const nextPath = renamedPath(node.path, nextName);
+    await api.renameWorkspacePath(node.path, nextName);
+
+    const nextRoots = activeWorkspace.roots.includes(node.path)
+      ? activeWorkspace.roots.map((root) => (root === node.path ? nextPath : root))
+      : undefined;
+    const nextActivePath = activeFilePath ? replacePathPrefix(activeFilePath, node.path, nextPath) : undefined;
+    await refreshWorkspaceAfterMutation(activeWorkspaceId, nextActivePath, nextRoots);
+  };
+
+  const handleDeleteNode = async (node: IdeTreeNode) => {
+    if (!activeWorkspaceId || !activeWorkspace) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete this ${node.kind}: ${node.name}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    const deletingWorkspaceRoot = activeWorkspace.roots.includes(node.path);
+    if (deletingWorkspaceRoot) {
+      await api.deleteWorkspacePath(node.path);
+      if (activeWorkspace.roots.length <= 1) {
+        await deleteWorkspace(activeWorkspaceId);
+        setActiveFilePath(undefined);
+        setFileContent("");
+        setSavedContent("");
+        return;
+      }
+
+      const nextRoots = activeWorkspace.roots.filter((root) => root !== node.path);
+      const nextActivePath =
+        activeFilePath && (activeFilePath === node.path || activeFilePath.startsWith(`${node.path}/`))
+          ? undefined
+          : activeFilePath;
+      await refreshWorkspaceAfterMutation(activeWorkspaceId, nextActivePath || undefined, nextRoots);
+      return;
+    }
+
+    await api.deleteWorkspacePath(node.path);
+    const nextActivePath =
+      activeFilePath && (activeFilePath === node.path || activeFilePath.startsWith(`${node.path}/`))
+        ? undefined
+        : activeFilePath;
+    if (!nextActivePath) {
+      setFileContent("");
+      setSavedContent("");
+    }
+    await refreshWorkspaceAfterMutation(activeWorkspaceId, nextActivePath);
+  };
+
+  const sendAssistantMessage = async () => {
+    const trimmed = assistantComposer.trim();
+    if (!trimmed || assistantSending) {
+      return;
+    }
+    setAssistantSending(true);
+    let conversationId = assistantConversationId;
+    if (!conversationId) {
+      const conversation = await api.createConversation({
+        title: activeItem ? `IDE • ${leafName(activeItem.path)}` : "IDE Assistant",
+      });
+      conversationId = conversation.id;
+      setAssistantConversationId(conversation.id);
+    }
+
+    const prompt = activeItem
+      ? `You are helping inside Grok Desktop IDE.\nCurrent file: ${activeItem.path}\nLanguage: ${activeItem.languageHint ?? "text"}\n\nCurrent file contents:\n\`\`\`${extensionForLanguage(activeItem.languageHint ?? undefined)}\n${fileContent}\n\`\`\`\n\nUser request:\n${trimmed}`
+      : trimmed;
+
+    setAssistantMessages((current) => [
+      ...current,
+      { id: `user-${Date.now()}`, role: "user", content: trimmed, status: "complete" },
+    ]);
+    setAssistantComposer("");
+
+    const handle = await api.sendMessage({
+      conversationId,
+      providerId: "xai",
+      modelId: assistantModel,
+      userText: prompt,
+      selectedWorkspaceItems: activeItem ? [activeItem.id] : [],
+    });
+    setAssistantMessages((current) => [
+      ...current,
+      { id: handle.messageId, role: "assistant", content: "", status: "streaming" },
+    ]);
+  };
+
+  const renderTreeNode = (node: IdeTreeNode, depth = 0): React.ReactNode => {
+    const isFolder = node.kind === "folder";
+    const isOpen = openFolders[node.id] ?? false;
+
+    return (
+      <div key={node.id}>
+        <button
+          type="button"
+          onClick={() => {
+            if (isFolder) {
+              setOpenFolders((current) => ({ ...current, [node.id]: !isOpen }));
+            } else {
+              handleSelectFile(node.path);
+            }
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setContextMenu({ node, x: event.clientX, y: event.clientY });
+          }}
+          className={clsx(
+            "flex w-full items-center gap-1.5 px-2 py-1 text-left text-[10px] transition",
+            !isFolder && node.path === activeFilePath
+              ? "bg-sky-300/10 text-sky-50"
+              : "text-stone-300 hover:bg-white/[0.04]",
+          )}
+          style={{ paddingLeft: `${8 + depth * 12}px` }}
+        >
+          {isFolder ? (
+            <>
+              <span className="flex h-3.5 w-3.5 items-center justify-center text-stone-500">
+                {isOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              </span>
+              {isOpen ? <FolderOpen className="h-3.5 w-3.5 text-stone-400" /> : <Folder className="h-3.5 w-3.5 text-stone-400" />}
+            </>
+          ) : (
+            <>
+              <span className="w-3.5" />
+              <Code2 className="h-3.5 w-3.5 text-stone-500" />
+            </>
+          )}
+          <span className="truncate">{node.name}</span>
+        </button>
+        {isFolder && isOpen ? node.children?.map((child) => renderTreeNode(child, depth + 1)) : null}
+      </div>
+    );
+  };
+
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-white/6 px-3 py-2.5">
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">IDE</p>
+          <p className="mt-1 truncate text-[12px] text-stone-400">
+            {activeWorkspace ? `${activeWorkspace.name} workspace` : "Open a workspace to start editing"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void createWorkspaceFromFolder()}
+            className="inline-flex items-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            Open Folder
+          </button>
+          <select
+            value={activeWorkspaceId ?? ""}
+            onChange={(event) => {
+              if (event.target.value) {
+                void selectWorkspace(event.target.value);
+              }
+            }}
+            className="min-w-[180px] rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-emerald-300/35"
+          >
+            <option value="" disabled>
+              Select workspace
+            </option>
+            {workspaces.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.name}
+              </option>
+            ))}
+          </select>
+          {activeWorkspaceId ? (
+            <button
+              type="button"
+              onClick={() => void scanWorkspace(activeWorkspaceId)}
+              className="inline-flex items-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+            >
+              <RefreshCcw className={clsx("h-3 w-3", scanningWorkspaceId === activeWorkspaceId && "animate-spin")} />
+              Rescan
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {activeWorkspaceId ? (
+        <div
+          className="grid min-h-0 flex-1 overflow-hidden"
+          style={{
+            gridTemplateColumns: `54px ${clampedIdeLeftWidth}px 8px minmax(0,1fr) 8px ${clampedIdeRightWidth}px`,
+          }}
+        >
+          <aside className="flex min-h-0 flex-col items-center gap-2 border-r border-white/6 bg-[rgba(8,9,11,0.96)] px-2 py-3">
+            {(
+              [
+                ["explorer", Files, "Files"],
+                ["workspace", FolderPlus, "Workspace"],
+                ["browser", Globe, "Browser"],
+              ] as const
+            ).map(([mode, Icon, label]) => (
+              <button
+                key={mode}
+                type="button"
+                title={label}
+                onClick={() => setLeftMode(mode as "explorer" | "workspace" | "browser")}
+                className={clsx(
+                  "inline-flex h-10 w-10 items-center justify-center rounded-2xl border transition",
+                  leftMode === mode
+                    ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50 shadow-[0_10px_30px_rgba(0,0,0,0.22)]"
+                    : "border-transparent bg-white/[0.03] text-stone-500 hover:border-white/8 hover:bg-white/[0.06] hover:text-stone-100",
+                )}
+              >
+                <Icon className="h-4 w-4" />
+              </button>
+            ))}
+          </aside>
+
+          <aside className="flex min-h-0 flex-col overflow-hidden border-r border-white/6 bg-[rgba(10,11,13,0.96)]">
+            <div className="border-b border-white/6 px-3 py-3">
+              <p className="text-[10px] uppercase tracking-[0.28em] text-[#84a09b]">
+                {leftMode === "explorer" ? "Explorer" : leftMode === "workspace" ? "Workspaces" : "Browser"}
+              </p>
+              <p className="mt-1 text-[11px] text-stone-500">
+                {leftMode === "explorer"
+                  ? `${workspaceItems.length} indexed files`
+                  : leftMode === "workspace"
+                    ? "Switch active project roots"
+                    : "Open preview routes and local URLs"}
+              </p>
+              {leftMode === "explorer" ? (
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Filter files"
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/35"
+                />
+              ) : null}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+              {leftMode === "explorer" ? (
+                tree.length ? (
+                  tree.map((node) => renderTreeNode(node))
+                ) : (
+                  <EmptyPanel
+                    eyebrow="Files"
+                    title="No indexed files."
+                    body="Rescan the workspace or choose a different folder to populate the IDE explorer."
+                  />
+                )
+              ) : leftMode === "workspace" ? (
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => void createWorkspaceFromFolder()}
+                    className="inline-flex w-full items-center justify-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20"
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                    Add Folder
+                  </button>
+                  <div className="space-y-1.5">
+                  {workspaces.map((workspace) => (
+                    <button
+                      key={workspace.id}
+                      type="button"
+                      onClick={() => void selectWorkspace(workspace.id)}
+                      className={clsx(
+                        "w-full rounded-xl border px-3 py-2 text-left transition",
+                        workspace.id === activeWorkspaceId
+                          ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-50"
+                          : "border-transparent bg-white/[0.03] text-stone-300 hover:border-white/8 hover:bg-white/[0.05]",
+                      )}
+                    >
+                      <p className="truncate text-[11px] font-medium text-stone-100">{workspace.name}</p>
+                      <p className="mt-1 text-[9px] text-stone-500">{workspace.itemCount} indexed files</p>
+                    </button>
+                  ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3 px-1 py-1">
+                  <label className="block text-[10px] text-stone-400">
+                    <span className="mb-1.5 block uppercase tracking-[0.2em]">Browser URL</span>
+                    <input
+                      value={browserDraftUrl}
+                      onChange={(event) => setBrowserDraftUrl(event.target.value)}
+                      className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-sky-300/40"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => openBrowserUrl()}
+                    className="inline-flex w-full items-center justify-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+                  >
+                    <Globe className="h-3 w-3" />
+                    Open URL
+                  </button>
+                  {detectedServerUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => openBrowserUrl(detectedServerUrl)}
+                      className="inline-flex w-full items-center justify-center gap-1 rounded-xl border border-sky-300/18 bg-sky-300/10 px-3 py-2 text-[10px] text-sky-100 transition hover:bg-sky-300/16"
+                    >
+                      Use detected localhost
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      chrome?.openBrowserPreview(buildPreviewDocument(fileContent, activeItem?.languageHint ?? undefined));
+                      onShowBrowser();
+                    }}
+                    disabled={!activeItem}
+                    className="inline-flex w-full items-center justify-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:text-stone-500"
+                  >
+                    <Eye className="h-3 w-3" />
+                    Open Current Preview
+                  </button>
+                </div>
+              )}
+            </div>
+          </aside>
+
+          <ResizeHandle
+            orientation="vertical"
+            onPointerDown={(event) =>
+              setIdeDragPane({ side: "left", startX: event.clientX, startValue: clampedIdeLeftWidth })
+            }
+          />
+
+          <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden bg-[linear-gradient(180deg,rgba(8,9,11,0.99),rgba(6,7,9,0.98))]">
+            <div className="flex items-center justify-between gap-3 border-b border-white/6 px-3 py-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="inline-flex min-w-0 items-center gap-2 rounded-t-2xl border border-b-0 border-white/8 bg-white/[0.04] px-3 py-2">
+                  <Code2 className="h-3.5 w-3.5 text-stone-400" />
+                  <span className="truncate text-[11px] text-stone-100">
+                    {activeItem ? leafName(activeItem.path) : "untitled"}
+                  </span>
+                  {dirty ? <span className="h-1.5 w-1.5 rounded-full bg-amber-300" /> : null}
+                </div>
+                <p className="truncate font-['IBM_Plex_Mono'] text-[10px] text-stone-500">
+                  {activeItem?.path ?? "Select a file from the explorer"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard.writeText(activeItem?.path ?? "")}
+                  disabled={!activeItem}
+                  className="inline-flex items-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:text-stone-500"
+                >
+                  <Copy className="h-3 w-3" />
+                  Path
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewMode((current) => (current === "preview" ? "code" : "preview"))}
+                  disabled={!activeItem}
+                  className="inline-flex items-center gap-1 rounded-xl border border-sky-300/18 bg-sky-300/10 px-3 py-2 text-[10px] text-sky-100 transition hover:bg-sky-300/16 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+                >
+                  <Eye className="h-3 w-3" />
+                  {previewMode === "preview" ? "Code" : "Preview"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSave()}
+                  disabled={!activeItem || !dirty || savingFile}
+                  className="inline-flex items-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+                >
+                  <Save className="h-3 w-3" />
+                  {savingFile ? "Saving…" : dirty ? "Save" : "Saved"}
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 bg-[#070809] p-3">
+              {activeItem ? (
+                loadingFile ? (
+                  <div className="flex h-full items-center justify-center text-[11px] text-stone-500">Loading file…</div>
+                ) : previewMode === "preview" ? (
+                  <iframe
+                    title="IDE preview"
+                    srcDoc={buildPreviewDocument(fileContent, activeItem?.languageHint ?? undefined)}
+                    sandbox="allow-scripts allow-same-origin"
+                    className="h-full w-full rounded-[18px] border border-white/8 bg-[#050607]"
+                  />
+                ) : (
+                  <textarea
+                    value={fileContent}
+                    onChange={(event) => setFileContent(event.target.value)}
+                    spellCheck={false}
+                    className="h-full w-full resize-none rounded-[18px] border border-white/8 bg-[#050607] px-4 py-4 font-['IBM_Plex_Mono'] text-[11px] leading-6 text-stone-100 outline-none"
+                  />
+                )
+              ) : (
+                <EmptyPanel
+                  eyebrow="IDE"
+                  title="Select a file from the explorer."
+                  body="Use the left rail to switch between project files, workspace roots, and the browser tools."
+                />
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-white/6 px-3 py-2 text-[10px] text-stone-500">
+              <div className="flex items-center gap-3">
+                <span>{activeItem?.languageHint ?? "text"}</span>
+                <span>{activeItem ? formatFileSize(activeItem.byteSize) : "No file selected"}</span>
+                {dirty ? <span className="text-amber-200">Unsaved changes</span> : <span>Saved</span>}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  chrome?.openBrowserPreview(buildPreviewDocument(fileContent, activeItem?.languageHint ?? undefined));
+                  onShowBrowser();
+                }}
+                disabled={!activeItem}
+                className="inline-flex items-center gap-1 text-stone-400 transition hover:text-stone-100 disabled:cursor-not-allowed disabled:text-stone-600"
+              >
+                <Globe className="h-3 w-3" />
+                Open in browser
+              </button>
+            </div>
+          </section>
+
+          <ResizeHandle
+            orientation="vertical"
+            onPointerDown={(event) =>
+              setIdeDragPane({ side: "right", startX: event.clientX, startValue: clampedIdeRightWidth })
+            }
+          />
+
+          <aside className="flex min-h-0 flex-col overflow-hidden border-l border-white/6 bg-[rgba(10,11,13,0.97)]">
+            <div className="border-b border-white/6 px-3 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Assistant</p>
+                  <h3 className="mt-1 text-[13px] font-semibold text-stone-100">Grok IDE Copilot</h3>
+                  <p className="mt-1 text-[10px] leading-5 text-stone-500">
+                    Ask Grok about the open file, then apply its answer directly into the editor.
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-white/5 p-2 text-stone-100">
+                  <Bot className="h-4 w-4" />
+                </div>
+              </div>
+              <select
+                value={assistantModel}
+                onChange={(event) => setAssistantModel(event.target.value)}
+                className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-emerald-300/35"
+              >
+                {CHAT_MODELS.map((modelId) => (
+                  <option key={modelId} value={modelId}>
+                    {modelId}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
+              {assistantMessages.length ? (
+                assistantMessages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={clsx(
+                      "rounded-[18px] border px-3 py-2.5",
+                      message.role === "assistant"
+                        ? "border-white/8 bg-white/[0.03] text-stone-100"
+                        : "border-emerald-300/16 bg-emerald-300/8 text-emerald-50",
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[9px] uppercase tracking-[0.2em] text-stone-400">
+                        {message.role === "assistant" ? assistantModel : "You"}
+                      </p>
+                      <p className="text-[9px] text-stone-500">{message.status}</p>
+                    </div>
+                    <p className="mt-2 whitespace-pre-wrap text-[11px] leading-5">{message.content || "…"}</p>
+                    {message.role === "assistant" && message.content ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewMode("code");
+                          setFileContent(extractAssistantCode(message.content));
+                        }}
+                        className="mt-3 inline-flex items-center gap-1 rounded-lg border border-amber-300/18 bg-amber-300/10 px-2 py-1 text-[10px] text-amber-50 transition hover:bg-amber-300/16"
+                      >
+                        <Code2 className="h-3 w-3" />
+                        Replace Open File
+                      </button>
+                    ) : null}
+                  </article>
+                ))
+              ) : (
+                <EmptyPanel
+                  eyebrow="Assistant"
+                  title="No IDE prompts yet."
+                  body="Select a file and ask Grok to explain, refactor, or rewrite it."
+                />
+              )}
+            </div>
+            <div className="border-t border-white/6 px-3 py-3">
+              <p className="mb-2 text-[10px] text-stone-500">
+                {activeItem ? `Context file: ${leafName(activeItem.path)}` : "Open a file to give Grok direct context."}
+              </p>
+              <textarea
+                value={assistantComposer}
+                onChange={(event) => setAssistantComposer(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendAssistantMessage();
+                  }
+                }}
+                placeholder="Ask Grok to change the current file…"
+                className="min-h-24 w-full resize-none rounded-[18px] border border-white/8 bg-black/30 px-3 py-3 text-[11px] leading-5 text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/35"
+              />
+              <button
+                type="button"
+                onClick={() => void sendAssistantMessage()}
+                disabled={!assistantComposer.trim() || assistantSending}
+                className="mt-2 inline-flex w-full items-center justify-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+              >
+                <Send className="h-3 w-3" />
+                {assistantSending ? "Sending…" : "Send To Grok"}
+              </button>
+            </div>
+          </aside>
+        </div>
+      ) : (
+        <div className="px-3 py-3">
+          <EmptyPanel
+            eyebrow="IDE"
+            title="No workspace selected."
+            body="Attach a workspace from the right sidebar first, then this page will open its indexed files as an in-app IDE."
+          />
+        </div>
+      )}
+      {contextMenu ? (
+        <div
+          className="fixed z-50 w-44 rounded-[18px] border border-white/8 bg-[#0b0c0d] p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)]"
+          style={{
+            left: Math.min(contextMenu.x, window.innerWidth - 188),
+            top: Math.min(contextMenu.y, window.innerHeight - 156),
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {contextMenu.node.kind === "folder" ? (
+            <button
+              type="button"
+              onClick={() => {
+                setContextMenu(undefined);
+                void handleCreateFile(contextMenu.node);
+              }}
+              className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+            >
+              <Code2 className="h-3.5 w-3.5" />
+              New File
+            </button>
+          ) : null}
+          {contextMenu.node.kind === "file" ? (
+            <button
+              type="button"
+              onClick={() => {
+                handleSelectFile(contextMenu.node.path);
+                setContextMenu(undefined);
+              }}
+              className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+            >
+              <Code2 className="h-3.5 w-3.5" />
+              Edit File
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              setContextMenu(undefined);
+              void handleRenameNode(contextMenu.node);
+            }}
+          className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Edit Name
+        </button>
+          <button
+            type="button"
+            onClick={() => {
+              setContextMenu(undefined);
+              void handleDeleteNode(contextMenu.node);
+            }}
+            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-rose-100 transition hover:bg-rose-500/15"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RightSidebar({
+  page,
+  mode,
+  onSelectMode,
+}: {
+  page: AppPage;
+  mode: RightPanelMode;
+  onSelectMode: (mode: RightPanelMode) => void;
+}) {
+  return (
+    <aside className="flex min-h-0 flex-col bg-[linear-gradient(180deg,rgba(10,11,13,0.98),rgba(7,8,10,0.95))]">
+      <div className="border-b border-white/6 px-3 py-3">
+        <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">Right Sidebar</p>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => onSelectMode("workspace")}
+            className={clsx(
+              "inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+              mode === "workspace"
+                ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+            )}
+          >
+            <Files className="h-3.5 w-3.5" />
+            Workspace
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectMode("browser")}
+            className={clsx(
+              "inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+              mode === "browser"
+                ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+            )}
+          >
+            <Globe className="h-3.5 w-3.5" />
+            Browser
+          </button>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1">
+        {mode === "workspace" ? <WorkspaceDrawer page={page} /> : <BrowserPanel />}
+      </div>
+    </aside>
+  );
+}
+
+function WorkspaceDrawer({ page }: { page: AppPage }) {
+  const chrome = useContext(ShellChromeContext);
+  const workspaces = useAppStore((state) => state.workspaces);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const workspaceItemsMap = useAppStore((state) => state.workspaceItems);
+  const workspaceSelection = useAppStore((state) => state.workspaceSelection);
+  const scanningWorkspaceId = useAppStore((state) => state.scanningWorkspaceId);
+  const createWorkspaceFromFolder = useAppStore((state) => state.createWorkspaceFromFolder);
+  const createWorkspaceFromFiles = useAppStore((state) => state.createWorkspaceFromFiles);
+  const replaceWorkspaceFromFolder = useAppStore((state) => state.replaceWorkspaceFromFolder);
+  const replaceWorkspaceFromFiles = useAppStore((state) => state.replaceWorkspaceFromFiles);
+  const deleteWorkspace = useAppStore((state) => state.deleteWorkspace);
+  const selectWorkspace = useAppStore((state) => state.selectWorkspace);
+  const scanWorkspace = useAppStore((state) => state.scanWorkspace);
+  const toggleWorkspaceItem = useAppStore((state) => state.toggleWorkspaceItem);
+  const importLocalMediaAsset = useAppStore((state) => state.importLocalMediaAsset);
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+  const workspaceItems = activeWorkspaceId ? workspaceItemsMap[activeWorkspaceId] ?? [] : [];
+  const [workspaceMedia, setWorkspaceMedia] = useState<WorkspaceMediaFile[]>([]);
+  const [workspaceMediaLoading, setWorkspaceMediaLoading] = useState(false);
+  const [importingPath, setImportingPath] = useState<string>();
+  const workspaceMediaKinds =
+    page === "voice" ? ["audio"] : page === "imagine" ? ["image", "video"] : ["image", "video", "audio"];
+  const isTextWorkspace = page === "chat" || page === "ide";
+
+  useEffect(() => {
+    if (isTextWorkspace || !activeWorkspaceId) {
+      setWorkspaceMedia([]);
+      return;
+    }
+
+    let cancelled = false;
+    setWorkspaceMediaLoading(true);
+    void api
+      .listWorkspaceMedia(activeWorkspaceId)
+      .then((items) => {
+        if (!cancelled) {
+          setWorkspaceMedia(items.filter((item) => workspaceMediaKinds.includes(item.kind)));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWorkspaceMedia([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setWorkspaceMediaLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace?.lastScannedAt, activeWorkspace?.roots, activeWorkspaceId, isTextWorkspace, page]);
+
+  const workspaceHeading =
+    page === "imagine"
+      ? "Workspace Media"
+      : page === "voice"
+        ? "Workspace Audio"
+        : page === "ide"
+          ? "Workspace"
+        : page === "editor"
+          ? "Editor Sources"
+          : "Workspace";
+  const workspaceBody =
+    page === "imagine"
+      ? "Browse local image and video files from the active workspace and send them straight into the editor."
+      : page === "voice"
+        ? "Browse local audio files from the active workspace and queue them into the editor."
+        : page === "ide"
+          ? "Select or rescan a workspace here, then use the IDE page to browse and edit its indexed text files."
+        : page === "editor"
+          ? "Pull image, video, and audio files from the active workspace into the media editor."
+          : "Index local folders or files as prompt context.";
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-white/6 px-3 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-[13px] font-semibold text-stone-100">{workspaceHeading}</h2>
+            <p className="mt-1 text-[10px] text-stone-500">{workspaceBody}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void createWorkspaceFromFolder()}
+            className="rounded-xl border border-white/8 bg-white/5 p-2 text-stone-200 transition hover:bg-white/10"
+            aria-label="Add folder"
+          >
+            <FolderPlus className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={() => void createWorkspaceFromFolder()}
+            className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+          >
+            Folder
+          </button>
+          <button
+            type="button"
+            onClick={() => void createWorkspaceFromFiles()}
+            className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+          >
+            Files
+          </button>
+        </div>
+      </div>
+
+      <div className="border-b border-white/6 px-4 py-3">
+        <div className="flex flex-wrap gap-2">
+          {workspaces.map((workspace) => (
+            <button
+              key={workspace.id}
+              type="button"
+              onClick={() => void selectWorkspace(workspace.id)}
+              className={clsx(
+                "rounded-full border px-3 py-1.5 text-[10px] transition",
+                workspace.id === activeWorkspaceId
+                  ? "border-sky-200/16 bg-sky-300/10 text-sky-100"
+                  : "border-white/8 bg-white/4 text-stone-300 hover:bg-white/8",
+              )}
+            >
+              {workspace.name}
+            </button>
+          ))}
+        </div>
+        {activeWorkspaceId ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void scanWorkspace(activeWorkspaceId)}
+              className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+            >
+              <RefreshCcw className={clsx("h-3.5 w-3.5", scanningWorkspaceId === activeWorkspaceId && "animate-spin")} />
+              Rescan
+            </button>
+            <button
+              type="button"
+              onClick={() => void replaceWorkspaceFromFolder(activeWorkspaceId)}
+              className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+            >
+              Replace folder
+            </button>
+            <button
+              type="button"
+              onClick={() => void replaceWorkspaceFromFiles(activeWorkspaceId)}
+              className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+            >
+              Replace files
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(`Remove workspace "${activeWorkspace?.name ?? "Workspace"}"?`)) {
+                  void deleteWorkspace(activeWorkspaceId);
+                }
+              }}
+              className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-rose-200 transition hover:bg-rose-500/15"
+            >
+              Remove
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="flex-1 space-y-2 overflow-y-auto px-4 py-4">
+        {isTextWorkspace ? workspaceItems.length ? (
+          workspaceItems.map((item) => (
+            <WorkspaceItemRow
+              key={item.id}
+              item={item}
+              selected={workspaceSelection[item.id] ?? false}
+              onToggle={() => toggleWorkspaceItem(item.id)}
+            />
+          ))
+        ) : (
+          <EmptyPanel
+            eyebrow="No workspace"
+            title="Attach a folder or selected files."
+            body="Supported text files are indexed locally and can be included in each prompt."
+          />
+        ) : !activeWorkspaceId ? (
+          <EmptyPanel
+            eyebrow="No workspace"
+            title="Attach a folder or selected files."
+            body="Pick a workspace first, then this panel will surface local media files that match the current page."
+          />
+        ) : workspaceMediaLoading ? (
+          <div className="rounded-[18px] border border-white/8 bg-white/[0.03] px-3 py-4 text-[11px] text-stone-400">
+            Loading workspace media…
+          </div>
+        ) : workspaceMedia.length ? (
+          workspaceMedia.map((item) => (
+            <button
+              key={item.path}
+              type="button"
+              onClick={() => {
+                setImportingPath(item.path);
+                importLocalMediaAsset(item.path, undefined, item.fileName.replace(/\.[^.]+$/, "")).then((asset) => {
+                  if (asset) {
+                    chrome?.openEditorAsset(asset);
+                  }
+                  setImportingPath((current) => (current === item.path ? undefined : current));
+                });
+              }}
+              className="w-full rounded-[18px] border border-white/8 bg-white/[0.03] px-3 py-3 text-left transition hover:bg-white/[0.06]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full border border-white/8 bg-white/5 px-2 py-0.5 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-400">
+                      {item.kind}
+                    </span>
+                    <span className="text-[9px] text-stone-500">{formatFileSize(item.fileSize)}</span>
+                  </div>
+                  <p className="mt-2 truncate text-[11px] font-medium text-stone-100">{item.fileName}</p>
+                  <p className="mt-1 truncate font-['IBM_Plex_Mono'] text-[10px] text-stone-500">{item.path}</p>
+                </div>
+                <span className="rounded-xl border border-amber-300/18 bg-amber-300/10 px-2 py-1 text-[10px] text-amber-50">
+                  {importingPath === item.path ? "Adding…" : "Add to Editor"}
+                </span>
+              </div>
+            </button>
+          ))
+        ) : (
+          <EmptyPanel
+            eyebrow="No local media"
+            title="No matching files in this workspace."
+            body={
+              page === "voice"
+                ? "This workspace does not currently expose any audio files."
+                : page === "imagine"
+                  ? "This workspace does not currently expose any image or video files."
+                  : "This workspace does not currently expose any importable media files."
+            }
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceItemRow({
+  item,
+  selected,
+  onToggle,
+}: {
+  item: WorkspaceItem;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={clsx(
+        "w-full rounded-[18px] border px-3 py-3 text-left transition",
+        selected ? "border-emerald-200/16 bg-emerald-300/8" : "border-white/8 bg-white/[0.03] hover:bg-white/[0.06]",
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-[11px] text-stone-100">{leafName(item.path)}</p>
+          <p className="mt-1 truncate font-['IBM_Plex_Mono'] text-[10px] text-stone-600">{item.path}</p>
+        </div>
+        <div className="text-right text-[10px] text-stone-500">
+          <p>{Math.round(item.byteSize / 1024)} KB</p>
+          <p>{item.chunkCount} chunks</p>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function EditorPage({
+  clips,
+  activeClipId,
+  onSelectClip,
+  onUpdateClip,
+  onRemoveClip,
+  onMoveClip,
+  onClear,
+}: {
+  clips: EditorClip[];
+  activeClipId?: string;
+  onSelectClip: (clipId?: string) => void;
+  onUpdateClip: (clipId: string, patch: Partial<EditorClip>) => void;
+  onRemoveClip: (clipId: string) => void;
+  onMoveClip: (clipId: string, direction: "up" | "down") => void;
+  onClear: () => void;
+}) {
+  const chrome = useContext(ShellChromeContext);
+  const mediaCategories = useAppStore((state) => state.mediaCategories);
+  const selectedMediaCategoryId = useAppStore((state) => state.selectedMediaCategoryId);
+  const exportingEditor = useAppStore((state) => state.exportingEditor);
+  const exportEditorTimeline = useAppStore((state) => state.exportEditorTimeline);
+  const [exportTitle, setExportTitle] = useState("Editor Export");
+  const [exportCategoryId, setExportCategoryId] = useState<string>(selectedMediaCategoryId ?? "");
+  const [previewSources, setPreviewSources] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!exportCategoryId && selectedMediaCategoryId) {
+      setExportCategoryId(selectedMediaCategoryId);
+    }
+  }, [exportCategoryId, selectedMediaCategoryId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const missing = clips.filter((clip) => !previewSources[clip.asset.id]);
+    if (!missing.length) {
+      return undefined;
+    }
+
+    void Promise.all(
+      missing.map(async (clip) => ({
+        assetId: clip.asset.id,
+        src: await api.readMediaDataUrl(clip.asset.filePath),
+      })),
+    )
+      .then((entries) => {
+        if (cancelled) {
+          return;
+        }
+        setPreviewSources((current) => ({
+          ...current,
+          ...Object.fromEntries(entries.map((entry) => [entry.assetId, entry.src])),
+        }));
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clips, previewSources]);
+
+  useEffect(() => {
+    if (!clips.length) {
+      if (activeClipId) {
+        onSelectClip(undefined);
+      }
+      return;
+    }
+    if (!activeClipId || !clips.some((clip) => clip.id === activeClipId)) {
+      onSelectClip(clips[clips.length - 1]?.id);
+    }
+  }, [activeClipId, clips, onSelectClip]);
+
+  const activeClip = clips.find((clip) => clip.id === activeClipId) ?? clips[clips.length - 1];
+  const activeSrc = activeClip ? previewSources[activeClip.asset.id] : undefined;
+  const visualTrack = useMemo(() => buildTimelineTrack(clips, "visual"), [clips]);
+  const audioTrack = useMemo(() => buildTimelineTrack(clips, "audio"), [clips]);
+  const timelineDuration = Math.max(visualTrack.duration, audioTrack.duration, 1);
+
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="border-b border-white/6 px-3 py-3">
+        <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">Editor</p>
+        <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-[18px] font-semibold text-stone-100">Media Editor</h2>
+            <p className="mt-1 text-[11px] text-stone-400">
+              Queue gallery assets here, shape the visual and audio timelines, then export a final `.mp4`.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-1.5 text-[10px] text-stone-400">
+            <span className="rounded-full border border-white/7 bg-white/[0.03] px-2.5 py-1">
+              {visualTrack.items.length} visual
+            </span>
+            <span className="rounded-full border border-white/7 bg-white/[0.03] px-2.5 py-1">
+              {audioTrack.items.length} audio
+            </span>
+            <span className="rounded-full border border-white/7 bg-white/[0.03] px-2.5 py-1 font-['IBM_Plex_Mono']">
+              {formatTimelineSeconds(timelineDuration)} total
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {clips.length ? (
+        <div className="grid min-h-0 flex-1 gap-2.5 overflow-y-auto px-3 py-3 xl:grid-cols-[minmax(0,1.58fr)_320px] xl:grid-rows-[minmax(340px,1fr)_minmax(260px,0.82fr)]">
+          <section className="flex min-h-[320px] min-w-0 flex-col overflow-hidden rounded-[24px] border border-white/8 bg-[linear-gradient(180deg,rgba(12,13,15,0.98),rgba(7,8,10,0.97))]">
+            <div className="flex items-start justify-between gap-3 border-b border-white/6 px-3 py-3">
+              <div>
+                <p className="font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-400">
+                  {activeClip ? `${activeClip.asset.kind} clip` : "Queue"}
+                </p>
+                <p className="mt-1 text-[13px] font-semibold text-stone-100">
+                  {activeClip?.asset.prompt ?? "Select a clip"}
+                </p>
+              </div>
+              {activeClip ? (
+                <div className="rounded-full border border-white/8 bg-white/5 px-2.5 py-1 font-['IBM_Plex_Mono'] text-[9px] text-stone-300">
+                  {leafName(activeClip.asset.filePath)}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex min-h-0 flex-1 items-center justify-center bg-[radial-gradient(circle_at_top,rgba(38,56,54,0.24),rgba(3,5,7,0.98)_62%)] p-4">
+              <EditorPreview clip={activeClip} src={activeSrc} />
+            </div>
+
+            <div className="border-t border-white/6 px-3 py-2.5">
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {clips.map((clip, index) => (
+                  <button
+                    key={clip.id}
+                    type="button"
+                    onClick={() => onSelectClip(clip.id)}
+                    className={clsx(
+                      "rounded-[16px] border px-3 py-2 text-left transition",
+                      clip.id === activeClipId
+                        ? "border-amber-300/20 bg-amber-300/10 text-amber-50"
+                        : "border-white/8 bg-white/[0.03] text-stone-300 hover:bg-white/[0.06]",
+                    )}
+                  >
+                    <p className="font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-400">
+                      Clip {index + 1} · {clip.asset.kind}
+                    </p>
+                    <p className="mt-1 line-clamp-2 text-[10px] leading-5">{clip.asset.prompt}</p>
+                    <p className="mt-2 text-[9px] text-stone-500">{formatTimelineSeconds(getEditorClipDuration(clip))}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <aside className="min-h-[320px] space-y-2.5 overflow-y-auto rounded-[24px] border border-white/8 bg-white/[0.03] p-2.5">
+            <section className="rounded-[20px] border border-white/8 bg-black/20 p-3">
+              <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Export</p>
+              <div className="mt-3 grid gap-2">
+                <input
+                  value={exportTitle}
+                  onChange={(event) => setExportTitle(event.target.value)}
+                  placeholder="Export title"
+                  className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-[11px] text-stone-100 outline-none focus:border-amber-300/35"
+                />
+                <select
+                  value={exportCategoryId}
+                  onChange={(event) => setExportCategoryId(event.target.value)}
+                  className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-amber-300/35"
+                >
+                  <option value="">Unsorted export</option>
+                  {mediaCategories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void exportEditorTimeline({
+                      title: exportTitle.trim() || "Editor Export",
+                      categoryId: exportCategoryId || undefined,
+                      clips: clips.map((clip) => ({
+                        assetId: clip.asset.id,
+                        kind: clip.asset.kind,
+                        filePath: clip.asset.filePath,
+                        trimStart: Number.isFinite(Number(clip.trimStart)) ? Number(clip.trimStart) : 0,
+                        trimEnd:
+                          clip.trimEnd.trim() && Number.isFinite(Number(clip.trimEnd))
+                            ? Number(clip.trimEnd)
+                            : undefined,
+                        stillDuration:
+                          clip.asset.kind === "image" && Number.isFinite(Number(clip.stillDuration))
+                            ? Number(clip.stillDuration)
+                            : 3,
+                      })),
+                    })
+                  }
+                  disabled={!clips.length || exportingEditor}
+                  className="rounded-xl border border-amber-300/20 bg-amber-300/12 px-3 py-2 text-[10px] font-semibold text-amber-50 transition hover:bg-amber-300/18 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+                >
+                  {exportingEditor ? "Exporting…" : "Export Video"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onClear}
+                  disabled={!clips.length || exportingEditor}
+                  className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:text-stone-500"
+                >
+                  Clear Timeline
+                </button>
+              </div>
+              <p className="mt-3 text-[10px] leading-5 text-stone-500">
+                Export currently builds the visual track and audio track separately, aligns both at `0s`, and finishes on the shorter result.
+              </p>
+            </section>
+
+            {activeClip ? (
+              <section className="rounded-[20px] border border-white/8 bg-black/20 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Inspector</p>
+                    <p className="mt-2 text-[12px] font-semibold text-stone-100">{activeClip.asset.prompt}</p>
+                  </div>
+                  <div className="rounded-full border border-white/8 bg-white/5 px-2 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-300">
+                    {activeClip.asset.kind}
+                  </div>
+                </div>
+
+                <div className="mt-3 grid gap-2">
+                  <label className="space-y-1 text-[10px] text-stone-400">
+                    <span>Trim start (s)</span>
+                    <input
+                      value={activeClip.trimStart}
+                      onChange={(event) => onUpdateClip(activeClip.id, { trimStart: event.target.value })}
+                      className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-amber-300/35"
+                    />
+                  </label>
+                  <label className="space-y-1 text-[10px] text-stone-400">
+                    <span>{activeClip.asset.kind === "image" ? "Still duration (s)" : "Trim end (s)"}</span>
+                    <input
+                      value={activeClip.asset.kind === "image" ? activeClip.stillDuration : activeClip.trimEnd}
+                      onChange={(event) =>
+                        activeClip.asset.kind === "image"
+                          ? onUpdateClip(activeClip.id, { stillDuration: event.target.value })
+                          : onUpdateClip(activeClip.id, { trimEnd: event.target.value })
+                      }
+                      className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-amber-300/35"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onMoveClip(activeClip.id, "up")}
+                    className="inline-flex items-center justify-center gap-1 rounded-xl border border-white/8 bg-white/5 px-2 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+                  >
+                    <MoveUp className="h-3 w-3" />
+                    Up
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onMoveClip(activeClip.id, "down")}
+                    className="inline-flex items-center justify-center gap-1 rounded-xl border border-white/8 bg-white/5 px-2 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+                  >
+                    <MoveDown className="h-3 w-3" />
+                    Down
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveClip(activeClip.id)}
+                    className="inline-flex items-center justify-center gap-1 rounded-xl border border-white/8 bg-white/5 px-2 py-2 text-[10px] text-rose-200 transition hover:bg-rose-500/15"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Remove
+                  </button>
+                </div>
+
+                <div className="mt-3 grid gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (activeSrc) {
+                        chrome?.openBrowserPreview(buildAssetPreviewDocument(activeClip.asset, activeSrc));
+                      }
+                    }}
+                    disabled={!activeSrc}
+                    className="inline-flex items-center justify-center gap-1 rounded-xl border border-sky-300/18 bg-sky-300/10 px-3 py-2 text-[10px] text-sky-100 transition hover:bg-sky-300/16 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+                  >
+                    <Eye className="h-3 w-3" />
+                    Open in Browser
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void navigator.clipboard.writeText(activeClip.asset.filePath)}
+                    className="inline-flex items-center justify-center gap-1 rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[10px] text-stone-200 transition hover:bg-white/10"
+                  >
+                    <Copy className="h-3 w-3" />
+                    Copy Path
+                  </button>
+                </div>
+              </section>
+            ) : null}
+          </aside>
+
+          <section className="flex min-h-[260px] flex-col overflow-hidden rounded-[24px] border border-white/8 bg-white/[0.03] xl:col-span-2">
+            <div className="flex items-center justify-between gap-3 border-b border-white/6 px-3 py-2.5">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Tracks</p>
+                <h3 className="mt-1 text-[13px] font-semibold text-stone-100">Visual and audio lanes</h3>
+              </div>
+              <p className="max-w-sm text-right text-[10px] leading-5 text-stone-500">
+                Visual clips chain left-to-right on the top lane. Audio clips build their own parallel lane so they overlap the picture from time zero.
+              </p>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2.5">
+              <TimelineScale duration={timelineDuration} />
+              <div className="mt-2.5 space-y-2.5">
+                <TimelineTrack
+                  label="Visual"
+                  emptyLabel="Add image or video assets from Imagine or Voice & Audio."
+                  items={visualTrack.items}
+                  timelineDuration={timelineDuration}
+                  activeClipId={activeClipId}
+                  onSelectClip={onSelectClip}
+                  onUpdateClip={onUpdateClip}
+                />
+                <TimelineTrack
+                  label="Audio"
+                  emptyLabel="Queue speech or audio clips to build the soundtrack."
+                  items={audioTrack.items}
+                  timelineDuration={timelineDuration}
+                  activeClipId={activeClipId}
+                  onSelectClip={onSelectClip}
+                  onUpdateClip={onUpdateClip}
+                />
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : (
+        <div className="px-3 py-3">
+          <EmptyPanel
+            eyebrow="Editor"
+            title="No clips queued yet."
+            body="Use the Editor button on any gallery card to send assets here, then shape the timeline and export the cut."
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EditorPreview({ clip, src }: { clip?: EditorClip; src?: string }) {
+  if (!clip) {
+    return <div className="text-[11px] text-stone-500">Select a clip to preview it here.</div>;
+  }
+
+  if (!src) {
+    return <div className="text-[11px] text-stone-500">Loading clip preview…</div>;
+  }
+
+  if (clip.asset.kind === "video") {
+    return (
+      <video
+        src={src}
+        controls
+        className="max-h-full max-w-full rounded-[20px] border border-white/8 bg-black object-contain"
+      />
+    );
+  }
+
+  if (clip.asset.kind === "audio") {
+    return (
+      <div className="flex w-full max-w-3xl flex-col items-center justify-center gap-4 rounded-[28px] border border-white/8 bg-black/25 px-6 py-8 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full border border-emerald-300/20 bg-emerald-300/10 text-emerald-100">
+          <AudioLines className="h-7 w-7" />
+        </div>
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.28em] text-[#84a09b]">Audio clip</p>
+          <p className="mt-2 text-[13px] font-semibold text-stone-100">{clip.asset.prompt}</p>
+        </div>
+        <audio src={src} controls className="w-full" />
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={clip.asset.prompt}
+      className="max-h-full max-w-full rounded-[20px] border border-white/8 bg-black object-contain"
+    />
+  );
+}
+
+function TimelineScale({ duration }: { duration: number }) {
+  const markers = Array.from({ length: 7 }, (_, index) => {
+    const ratio = index / 6;
+    return {
+      left: `${ratio * 100}%`,
+      value: duration * ratio,
+    };
+  });
+
+  return (
+    <div className="relative h-6 rounded-[14px] border border-white/6 bg-black/20">
+      {markers.map((marker) => (
+        <div key={marker.left} className="absolute inset-y-0" style={{ left: marker.left }}>
+          <div className="h-full w-px bg-white/8" />
+          <span className="absolute left-1.5 top-1/2 -translate-y-1/2 font-['IBM_Plex_Mono'] text-[8px] text-stone-500">
+            {formatTimelineSeconds(marker.value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TimelineTrack({
+  label,
+  emptyLabel,
+  items,
+  timelineDuration,
+  activeClipId,
+  onSelectClip,
+  onUpdateClip,
+}: {
+  label: string;
+  emptyLabel: string;
+  items: TimelineTrackItem[];
+  timelineDuration: number;
+  activeClipId?: string;
+  onSelectClip: (clipId?: string) => void;
+  onUpdateClip: (clipId: string, patch: Partial<EditorClip>) => void;
+}) {
+  const laneRef = useRef<HTMLDivElement>(null);
+  const [trimDrag, setTrimDrag] = useState<{
+    clip: EditorClip;
+    side: "start" | "end";
+    startX: number;
+  }>();
+
+  useEffect(() => {
+    if (!trimDrag) {
+      return undefined;
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      const width = laneRef.current?.getBoundingClientRect().width;
+      if (!width || width <= 0) {
+        return;
+      }
+      const deltaRatio = (event.clientX - trimDrag.startX) / width;
+      const deltaSeconds = deltaRatio * timelineDuration;
+      onUpdateClip(trimDrag.clip.id, buildClipTrimPatch(trimDrag.clip, trimDrag.side, deltaSeconds));
+    };
+
+    const onPointerUp = () => setTrimDrag(undefined);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [onUpdateClip, timelineDuration, trimDrag]);
+
+  return (
+    <div className="grid gap-2 md:grid-cols-[88px_minmax(0,1fr)]">
+      <div className="flex items-center rounded-[16px] border border-white/8 bg-black/20 px-3 py-3">
+        <p className="font-['IBM_Plex_Mono'] text-[10px] uppercase tracking-[0.22em] text-stone-400">{label}</p>
+      </div>
+      <div
+        ref={laneRef}
+        className="relative min-h-[84px] rounded-[18px] border border-white/8 bg-[linear-gradient(180deg,rgba(9,10,12,0.95),rgba(6,7,9,0.98))] p-2.5"
+      >
+        {items.length ? (
+          items.map((item) => {
+            const width = Math.max((item.duration / timelineDuration) * 100, 10);
+            const left = (item.start / timelineDuration) * 100;
+            const accent =
+              item.clip.asset.kind === "image"
+                ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                : item.clip.asset.kind === "video"
+                  ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                  : "border-amber-300/20 bg-amber-300/12 text-amber-50";
+
+            return (
+              <button
+                key={item.clip.id}
+                type="button"
+                onClick={() => onSelectClip(item.clip.id)}
+                className={clsx(
+                  "absolute bottom-2.5 top-2.5 overflow-hidden rounded-[16px] border px-2.5 py-1.5 text-left transition",
+                  item.clip.id === activeClipId ? accent : "border-white/10 bg-white/[0.04] text-stone-200 hover:bg-white/[0.08]",
+                )}
+                style={{
+                  left: `${Math.min(left, 92)}%`,
+                  width: `${Math.min(width, 100 - left)}%`,
+                }}
+              >
+                <span
+                  className="absolute inset-y-1.5 left-0 w-2 cursor-ew-resize rounded-l-[16px] bg-white/0 transition hover:bg-white/10"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    setTrimDrag({ clip: item.clip, side: "start", startX: event.clientX });
+                  }}
+                />
+                <span
+                  className="absolute inset-y-1.5 right-0 w-2 cursor-ew-resize rounded-r-[16px] bg-white/0 transition hover:bg-white/10"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    setTrimDrag({ clip: item.clip, side: "end", startX: event.clientX });
+                  }}
+                />
+                <p className="font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-current/75">
+                  {formatTimelineSeconds(item.start)} - {formatTimelineSeconds(item.end)}
+                </p>
+                <p className="mt-1 line-clamp-2 text-[10px] leading-5">{item.clip.asset.prompt}</p>
+              </button>
+            );
+          })
+        ) : (
+          <div className="flex h-full min-h-[78px] items-center justify-center rounded-[14px] border border-dashed border-white/8 bg-white/[0.02] text-[10px] text-stone-500">
+            {emptyLabel}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BrowserPanel() {
+  const browserUrl = useAppStore((state) => state.browserUrl);
+  const browserDraftUrl = useAppStore((state) => state.browserDraftUrl);
+  const browserPreviewHtml = useAppStore((state) => state.browserPreviewHtml);
+  const detectedServerUrl = useAppStore((state) => state.detectedServerUrl);
+  const setBrowserDraftUrl = useAppStore((state) => state.setBrowserDraftUrl);
+  const openBrowserUrl = useAppStore((state) => state.openBrowserUrl);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-white/6 px-4 py-4">
+        <h2 className="text-[13px] font-semibold text-stone-100">Browser</h2>
+        <p className="mt-1 text-[10px] text-stone-500">
+          {browserPreviewHtml
+            ? "Previewing the current snippet or generated asset."
+            : "Load localhost apps started from the footer terminal."}
+        </p>
+        <div className="mt-3 flex gap-2">
+          <input
+            value={browserDraftUrl}
+            onChange={(event) => setBrowserDraftUrl(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                openBrowserUrl();
+              }
+            }}
+            className="min-w-0 flex-1 rounded-xl border border-white/8 bg-black/35 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-sky-300/40"
+          />
+          <button
+            type="button"
+            onClick={() => openBrowserUrl()}
+            className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+          >
+            Open
+          </button>
+        </div>
+        {detectedServerUrl ? (
+          <button
+            type="button"
+            onClick={() => openBrowserUrl(detectedServerUrl)}
+            className="mt-3 rounded-xl border border-sky-300/18 bg-sky-300/10 px-3 py-2 text-[10px] text-sky-100 transition hover:bg-sky-300/16"
+          >
+            Use detected server: {detectedServerUrl}
+          </button>
+        ) : (
+          <p className="mt-3 text-[10px] text-stone-500">
+            Start a local server in the terminal and this panel will detect localhost URLs.
+          </p>
+        )}
+      </div>
+      <div className="min-h-0 flex-1 bg-[#0c0d0e]">
+        {browserPreviewHtml ? (
+          <iframe
+            title="Grok Desktop browser preview"
+            srcDoc={browserPreviewHtml}
+            sandbox="allow-scripts allow-same-origin"
+            className="h-full w-full border-0 bg-[#050607]"
+          />
+        ) : (
+          <iframe title="Grok Desktop browser" src={browserUrl} className="h-full w-full border-0 bg-[#050607]" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TerminalPanel() {
+  const terminalOutput = useAppStore((state) => state.terminalOutput);
+  const terminalSessionId = useAppStore((state) => state.terminalSessionId);
+  const writeTerminalData = useAppStore((state) => state.writeTerminalData);
+  const resizeTerminal = useAppStore((state) => state.resizeTerminal);
+  const terminalHostRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<XTerm | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const outputCursorRef = useRef(0);
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host) {
+      return undefined;
+    }
+
+    const terminal = new XTerm({
+      fontFamily: "IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: 11,
+      cursorBlink: true,
+      convertEol: false,
+      theme: {
+        background: "#070809",
+        foreground: "#d6d3d1",
+        cursor: "#a7f3d0",
+        black: "#0f1115",
+        brightBlack: "#4b5563",
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(host);
+    fitAddon.fit();
+    terminal.focus();
+
+    xtermRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+
+    if (terminalOutput) {
+      terminal.write(terminalOutput);
+      outputCursorRef.current = terminalOutput.length;
+    }
+
+    const dataSubscription = terminal.onData((value) => {
+      void writeTerminalData(value);
+    });
+
+    const resize = () => {
+      fitAddon.fit();
+      if (terminal.cols > 0 && terminal.rows > 0) {
+        void resizeTerminal(terminal.cols, terminal.rows);
+      }
+    };
+
+    resize();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => resize()) : null;
+    observer?.observe(host);
+
+    return () => {
+      observer?.disconnect();
+      dataSubscription.dispose();
+      terminal.dispose();
+      xtermRef.current = null;
+      fitAddonRef.current = null;
+      outputCursorRef.current = 0;
+    };
+  }, [resizeTerminal, writeTerminalData]);
+
+  useEffect(() => {
+    const terminal = xtermRef.current;
+    if (!terminal) {
+      return;
+    }
+    if (terminalOutput.length < outputCursorRef.current) {
+      terminal.reset();
+      outputCursorRef.current = 0;
+    }
+    const nextChunk = terminalOutput.slice(outputCursorRef.current);
+    if (nextChunk) {
+      terminal.write(nextChunk);
+      outputCursorRef.current = terminalOutput.length;
+    }
+  }, [terminalOutput]);
+
+  useEffect(() => {
+    const terminal = xtermRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon || !terminalSessionId) {
+      return;
+    }
+    fitAddon.fit();
+    if (terminal.cols > 0 && terminal.rows > 0) {
+      void resizeTerminal(terminal.cols, terminal.rows);
+    }
+  }, [resizeTerminal, terminalSessionId]);
+
+  return (
+    <section className="h-full min-h-0 bg-[linear-gradient(180deg,rgba(7,8,9,0.98),rgba(4,5,6,0.98))] px-3 py-3">
+      <div className="min-h-0 h-full bg-[#070809]">
+        <div
+          ref={terminalHostRef}
+          className="h-full w-full overflow-hidden rounded-[20px] border border-white/8 bg-[#070809] p-2"
+        />
+      </div>
+    </section>
+  );
+}
+
+function SettingsSheet({ onClose }: { onClose: () => void }) {
+  const settings = useAppStore((state) => state.settings);
+  const providerStatuses = useAppStore((state) => state.providerStatuses);
+  const saveSettings = useAppStore((state) => state.saveSettings);
+  const saveApiKey = useAppStore((state) => state.saveApiKey);
+  const deleteApiKey = useAppStore((state) => state.deleteApiKey);
+  const [draft, setDraft] = useState<Settings | undefined>(settings);
+  const [xAiKey, setXAiKey] = useState("");
+
+  useEffect(() => {
+    setDraft(settings);
+  }, [settings]);
+
+  if (!draft) {
+    return null;
+  }
+
+  const xAiConfigured = providerStatuses.find((status) => status.providerId === "xai")?.configured;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 px-6 py-8 backdrop-blur-xl">
+      <div className="w-full max-w-4xl rounded-[30px] border border-white/8 bg-[linear-gradient(180deg,#0b0b0d_0%,#090a0c_100%)] p-6 shadow-[0_28px_100px_rgba(0,0,0,0.6)]">
+        <div className="mb-6 flex items-start justify-between gap-4 border-b border-white/6 pb-5">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">Settings</p>
+            <h2 className="mt-2 text-xl font-semibold text-stone-100">Grok shell preferences</h2>
+            <p className="mt-2 max-w-xl text-[11px] leading-5 text-stone-500">
+              Tune the default Grok models, voice behavior, and shell controls from one place.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <section className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+            <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Shell</p>
+            <div className="mt-4 grid gap-4">
+              <label className="space-y-2 text-[11px] text-stone-300">
+                <span>Summon hotkey</span>
+                <input
+                  value={draft.hotkey}
+                  onChange={(event) => setDraft({ ...draft, hotkey: event.target.value })}
+                  className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-stone-100 outline-none transition focus:border-emerald-300/40"
+                />
+              </label>
+
+              <label className="flex items-center gap-3 rounded-2xl border border-white/8 bg-black/25 px-4 py-3 text-[11px] text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={draft.alwaysOnTop}
+                  onChange={(event) => setDraft({ ...draft, alwaysOnTop: event.target.checked })}
+                  className="h-4 w-4 rounded border-white/20 bg-transparent"
+                />
+                Keep Grok Desktop above other windows
+              </label>
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Models</p>
+                <p className="mt-1 text-[11px] text-stone-500">Default engines for chat, media, and live voice.</p>
+              </div>
+              <div className="rounded-full border border-emerald-300/18 bg-emerald-300/10 px-3 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.2em] text-emerald-100">
+                xAI
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <label className="rounded-2xl border border-white/8 bg-black/25 p-3 text-[11px] text-stone-300">
+                <span className="block text-[10px] uppercase tracking-[0.18em] text-stone-500">Chat model</span>
+                <select
+                  value={draft.xaiModel ?? CHAT_MODELS[2]}
+                  onChange={(event) => setDraft({ ...draft, xaiModel: event.target.value })}
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-emerald-300/40"
+                >
+                  {CHAT_MODELS.map((modelId) => (
+                    <option key={modelId} value={modelId}>
+                      {modelId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border border-white/8 bg-black/25 p-3 text-[11px] text-stone-300">
+                <span className="block text-[10px] uppercase tracking-[0.18em] text-stone-500">Image model</span>
+                <select
+                  value={draft.xaiImageModel ?? IMAGE_MODELS[1]}
+                  onChange={(event) => setDraft({ ...draft, xaiImageModel: event.target.value })}
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-emerald-300/40"
+                >
+                  {IMAGE_MODELS.map((modelId) => (
+                    <option key={modelId} value={modelId}>
+                      {modelId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border border-white/8 bg-black/25 p-3 text-[11px] text-stone-300">
+                <span className="block text-[10px] uppercase tracking-[0.18em] text-stone-500">Video model</span>
+                <select
+                  value={draft.xaiVideoModel ?? VIDEO_MODELS[0]}
+                  onChange={(event) => setDraft({ ...draft, xaiVideoModel: event.target.value })}
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-emerald-300/40"
+                >
+                  {VIDEO_MODELS.map((modelId) => (
+                    <option key={modelId} value={modelId}>
+                      {modelId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border border-white/8 bg-black/25 p-3 text-[11px] text-stone-300">
+                <span className="block text-[10px] uppercase tracking-[0.18em] text-stone-500">Realtime model</span>
+                <input
+                  value={draft.xaiRealtimeModel ?? "grok-realtime"}
+                  onChange={(event) => setDraft({ ...draft, xaiRealtimeModel: event.target.value })}
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-emerald-300/40"
+                />
+              </label>
+
+              <label className="rounded-2xl border border-white/8 bg-black/25 p-3 text-[11px] text-stone-300">
+                <span className="block text-[10px] uppercase tracking-[0.18em] text-stone-500">TTS model</span>
+                <input
+                  value={draft.xaiTtsModel ?? "xai-tts"}
+                  onChange={(event) => setDraft({ ...draft, xaiTtsModel: event.target.value })}
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-emerald-300/40"
+                />
+              </label>
+
+              <label className="rounded-2xl border border-white/8 bg-black/25 p-3 text-[11px] text-stone-300">
+                <span className="block text-[10px] uppercase tracking-[0.18em] text-stone-500">Default voice</span>
+                <select
+                  value={normalizeVoiceId(draft.xaiVoiceName)}
+                  onChange={(event) => setDraft({ ...draft, xaiVoiceName: event.target.value })}
+                  className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-emerald-300/40"
+                >
+                  {XAI_VOICE_OPTIONS.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div className="mt-5 rounded-[20px] border border-white/8 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.3em] text-stone-500">xAI API key</p>
+              <p className="mt-1 text-[11px] text-stone-500">Stored locally for Grok Desktop requests.</p>
+            </div>
+            <div className="rounded-full border border-white/8 bg-black/25 px-3 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.2em] text-stone-400">
+              {xAiConfigured ? "configured" : "missing"}
+            </div>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto_auto]">
+            <input
+              type="password"
+              value={xAiKey}
+              onChange={(event) => setXAiKey(event.target.value)}
+              placeholder="Paste xAI API key"
+              className="rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-emerald-300/40"
+            />
+            <button
+              type="button"
+              onClick={() => void saveApiKey("xai", xAiKey)}
+              className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-white/10"
+            >
+              Save key
+            </button>
+            {xAiConfigured ? (
+              <button
+                type="button"
+                onClick={() => void deleteApiKey("xai")}
+                className="rounded-xl border border-white/8 bg-white/5 px-3 py-2 text-[11px] text-stone-200 transition hover:bg-rose-500/15"
+              >
+                Delete key
+              </button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-[10px] text-stone-500">{xAiConfigured ? "Key configured." : "No key stored."}</p>
+        </div>
+
+        <div className="mt-6 flex justify-end">
+          <button
+            type="button"
+            onClick={() => void saveSettings(draft)}
+            className="rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-4 py-2 text-[11px] text-emerald-50 transition hover:bg-emerald-300/20"
+          >
+            Save preferences
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyPanel({
+  eyebrow,
+  title,
+  body,
+}: {
+  eyebrow: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="rounded-[22px] border border-dashed border-white/8 bg-white/[0.02] p-4">
+      <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">{eyebrow}</p>
+      <h3 className="mt-2.5 text-[13px] font-semibold text-stone-100">{title}</h3>
+      <p className="mt-2 text-[11px] leading-6 text-stone-500">{body}</p>
+    </div>
+  );
+}
+
+function ResizeHandle({
+  orientation,
+  onPointerDown,
+}: {
+  orientation: "vertical" | "horizontal";
+  onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      className={clsx("relative bg-transparent", orientation === "vertical" ? "cursor-col-resize" : "cursor-row-resize")}
+    >
+      <div
+        className={clsx(
+          "absolute inset-0 m-auto rounded-full bg-white/6 transition hover:bg-white/12",
+          orientation === "vertical" ? "h-16 w-[2px]" : "h-[2px] w-16",
+        )}
+      />
+    </div>
+  );
+}
+
+export default App;

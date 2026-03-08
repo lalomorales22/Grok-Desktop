@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title>Grok Desktop icon</title>
+  <rect width="1024" height="1024" rx="224" fill="#000000" />
+  <circle cx="512" cy="512" r="330" fill="#ffffff" />
+  <circle cx="512" cy="512" r="205" fill="#000000" />
+  <rect x="566" y="214" width="248" height="260" fill="#000000" />
+  <rect x="512" y="466" width="252" height="96" rx="48" fill="#ffffff" />
+</svg>

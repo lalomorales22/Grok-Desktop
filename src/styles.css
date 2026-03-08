@@ -1,0 +1,78 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+@import "xterm/css/xterm.css";
+
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #f4efe7;
+  background: #050505;
+  color-scheme: dark;
+  scrollbar-color: rgba(132, 160, 155, 0.48) #050607;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  height: 100%;
+  border-radius: 34px;
+  overflow: hidden;
+}
+
+html,
+body {
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  background: transparent;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes page-swap {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.994);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.prose pre {
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.prose code::before,
+.prose code::after {
+  content: "";
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: #050607;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(132, 160, 155, 0.55), rgba(125, 211, 252, 0.4));
+  border: 2px solid #050607;
+}
