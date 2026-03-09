@@ -126,6 +126,7 @@ impl Database {
             );
             "#,
         )?;
+        ensure_column(&conn, "messages", "tool_calls_json", "TEXT")?;
         ensure_column(&conn, "settings", "xai_model", "TEXT")?;
         ensure_column(&conn, "settings", "xai_image_model", "TEXT")?;
         ensure_column(&conn, "settings", "xai_video_model", "TEXT")?;
@@ -535,6 +536,19 @@ impl Database {
                 params![message_id, workspace_item_id],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn save_message_tool_calls(
+        &self,
+        message_id: &str,
+        tool_calls_json: &str,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE messages SET tool_calls_json = ?2 WHERE id = ?1",
+            params![message_id, tool_calls_json],
+        )?;
         Ok(())
     }
 

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AgentChatRequest,
+  AgentEvent,
   ChatRequest,
   Conversation,
   ConversationDetail,
@@ -112,6 +114,8 @@ export const api = {
     invoke<MediaAsset>("text_to_speech_command", { input }),
   createRealtimeSession: (input: RealtimeSessionRequest) =>
     invoke<RealtimeSession>("create_realtime_session_command", { input }),
+  sendAgentMessage: (input: AgentChatRequest) =>
+    invoke<StreamHandle>("send_agent_message", { input }),
   startTerminal: () => invoke<TerminalHandle>("start_terminal"),
   writeTerminalInput: (sessionId: string, input: string) =>
     invoke<void>("write_terminal_input", { sessionId, input }),
@@ -132,4 +136,6 @@ export const events = {
     listen<UiErrorEvent>("app://error", ({ payload }) => handler(payload)),
   onHands: (handler: (event: HandsStatus) => void) =>
     listen<HandsStatus>("hands://status", ({ payload }) => handler(payload)),
+  onAgent: (handler: (event: AgentEvent) => void) =>
+    listen<AgentEvent>("agent://event", ({ payload }) => handler(payload)),
 };

@@ -76,3 +76,60 @@ textarea {
   background: linear-gradient(180deg, rgba(132, 160, 155, 0.55), rgba(125, 211, 252, 0.4));
   border: 2px solid #050607;
 }
+
+/* highlight.js dark theme (minimal, matches app palette) */
+.hljs {
+  color: #c9d1d9;
+  background: transparent;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link {
+  color: #ff7b72;
+}
+.hljs-function .hljs-keyword {
+  color: #ff7b72;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-addition {
+  color: #a5d6ff;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_ {
+  color: #d2a8ff;
+}
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-built_in {
+  color: #ffa657;
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-deletion,
+.hljs-meta {
+  color: #8b949e;
+}
+.hljs-number {
+  color: #79c0ff;
+}
+.hljs-regexp {
+  color: #7ee787;
+}
+.hljs-symbol,
+.hljs-bullet {
+  color: #f2cc60;
+}
+.hljs-params {
+  color: #c9d1d9;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: bold;
+}

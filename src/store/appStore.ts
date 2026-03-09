@@ -2,6 +2,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { api, events } from "../lib/tauri";
 import type {
+  AgentChatRequest,
+  AgentEvent,
   ChatRequest,
   ConversationDetail,
   ConversationSummary,
@@ -65,6 +67,14 @@ interface AppState {
   handsStatus?: HandsStatus;
   handsBusy: boolean;
   realtimeSession?: RealtimeSession;
+  agentMode: boolean;
+  agentToolCalls: Array<{
+    toolName: string;
+    args: string;
+    result?: string;
+    success?: boolean;
+    isRunning: boolean;
+  }>;
   initialize: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   refreshProviderStatus: () => Promise<void>;
@@ -83,6 +93,8 @@ interface AppState {
   toggleConversationPin: (conversationId: string, pinned: boolean) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
   sendMessage: () => Promise<void>;
+  sendAgentMessage: () => Promise<void>;
+  toggleAgentMode: () => void;
   stopStream: () => Promise<void>;
   toggleSettings: (value?: boolean) => void;
   saveSettings: (next: Partial<Settings>) => Promise<void>;
@@ -201,6 +213,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   mediaCategories: [],
   mediaAssets: [],
   handsBusy: false,
+  agentMode: false,
+  agentToolCalls: [],
 
   initialize: async () => {
     try {
@@ -307,6 +321,74 @@ export const useAppStore = create<AppState>((set, get) => ({
 
         await events.onError((event) => set({ error: event.message }));
         await events.onHands((handsStatus) => set({ handsStatus, handsBusy: false }));
+
+        await events.onAgent((event: AgentEvent) => {
+          set((state) => {
+            const detail = state.activeConversation;
+
+            if (event.kind === "tool_call") {
+              return {
+                agentToolCalls: [
+                  ...state.agentToolCalls,
+                  {
+                    toolName: event.toolName ?? "unknown",
+                    args: event.toolArgs ?? "{}",
+                    isRunning: true,
+                  },
+                ],
+              };
+            }
+
+            if (event.kind === "tool_result") {
+              const calls = [...state.agentToolCalls];
+              let lastRunning = -1;
+              for (let i = calls.length - 1; i >= 0; i--) {
+                if (calls[i].isRunning) { lastRunning = i; break; }
+              }
+              if (lastRunning >= 0) {
+                calls[lastRunning] = {
+                  ...calls[lastRunning],
+                  result: event.toolResult ?? "",
+                  success: event.toolSuccess ?? false,
+                  isRunning: false,
+                };
+              }
+              return { agentToolCalls: calls };
+            }
+
+            if (event.kind === "text_delta" && detail) {
+              const messageId = event.messageId;
+              if (!messageId) return {};
+              const messages = detail.messages.map((msg) => {
+                if (msg.id !== messageId) return msg;
+                return {
+                  ...msg,
+                  content: `${msg.content}${event.textDelta ?? ""}`,
+                  status: "streaming",
+                };
+              });
+              return { activeConversation: { ...detail, messages } };
+            }
+
+            if (event.kind === "complete") {
+              return {
+                sending: false,
+                activeStreamId: undefined,
+              };
+            }
+
+            if (event.kind === "error") {
+              return {
+                sending: false,
+                activeStreamId: undefined,
+                error: event.error ?? "Agent execution failed.",
+              };
+            }
+
+            return {};
+          });
+        });
+
         set({ listenersReady: true });
       }
 
@@ -520,6 +602,45 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().loadConversation(conversationId);
     set({ activeStreamId: handle.streamId });
   },
+
+  sendAgentMessage: async () => {
+    const state = get();
+    const userText = state.composer.trim();
+    if (!userText || state.sending) return;
+
+    let conversationId = state.activeConversation?.conversation.id;
+    if (!conversationId) {
+      const conversation = await api.createConversation({ title: summarizeTitle(userText) });
+      conversationId = conversation.id;
+      await get().refreshConversations();
+    }
+
+    const modelId = state.selectedModel ?? pickModel(state.models);
+    if (!modelId) {
+      set({ error: "No Grok model is available." });
+      return;
+    }
+
+    const request: AgentChatRequest = {
+      conversationId,
+      providerId: "xai",
+      modelId,
+      userText,
+      selectedWorkspaceItems: Object.entries(state.workspaceSelection)
+        .filter(([, selected]) => selected)
+        .map(([itemId]) => itemId),
+      maxOutputTokens: 4096,
+      maxIterations: 25,
+    };
+
+    set({ sending: true, error: undefined, composer: "", agentToolCalls: [] });
+    const handle = await api.sendAgentMessage(request);
+    await get().refreshConversations();
+    await get().loadConversation(conversationId);
+    set({ activeStreamId: handle.streamId });
+  },
+
+  toggleAgentMode: () => set((state) => ({ agentMode: !state.agentMode })),
 
   stopStream: async () => {
     const streamId = get().activeStreamId;

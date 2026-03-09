@@ -34,6 +34,20 @@ import {
   WandSparkles,
   Wifi,
 } from "lucide-react";
+import hljs from "highlight.js/lib/core";
+import hljsBash from "highlight.js/lib/languages/bash";
+import hljsCss from "highlight.js/lib/languages/css";
+import hljsGo from "highlight.js/lib/languages/go";
+import hljsJava from "highlight.js/lib/languages/java";
+import hljsJs from "highlight.js/lib/languages/javascript";
+import hljsJson from "highlight.js/lib/languages/json";
+import hljsMarkdown from "highlight.js/lib/languages/markdown";
+import hljsPython from "highlight.js/lib/languages/python";
+import hljsRust from "highlight.js/lib/languages/rust";
+import hljsSql from "highlight.js/lib/languages/sql";
+import hljsTs from "highlight.js/lib/languages/typescript";
+import hljsXml from "highlight.js/lib/languages/xml";
+import hljsYaml from "highlight.js/lib/languages/yaml";
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -41,6 +55,31 @@ import { Terminal as XTerm } from "xterm";
 import { api, events } from "./lib/tauri";
 import { useAppStore } from "./store/appStore";
 import type { MediaAsset, Message, Settings, StreamEvent, WorkspaceItem, WorkspaceMediaFile } from "./types";
+
+// Register highlight.js languages
+hljs.registerLanguage("bash", hljsBash);
+hljs.registerLanguage("sh", hljsBash);
+hljs.registerLanguage("shell", hljsBash);
+hljs.registerLanguage("css", hljsCss);
+hljs.registerLanguage("go", hljsGo);
+hljs.registerLanguage("java", hljsJava);
+hljs.registerLanguage("javascript", hljsJs);
+hljs.registerLanguage("js", hljsJs);
+hljs.registerLanguage("json", hljsJson);
+hljs.registerLanguage("markdown", hljsMarkdown);
+hljs.registerLanguage("md", hljsMarkdown);
+hljs.registerLanguage("python", hljsPython);
+hljs.registerLanguage("py", hljsPython);
+hljs.registerLanguage("rust", hljsRust);
+hljs.registerLanguage("rs", hljsRust);
+hljs.registerLanguage("sql", hljsSql);
+hljs.registerLanguage("typescript", hljsTs);
+hljs.registerLanguage("ts", hljsTs);
+hljs.registerLanguage("tsx", hljsTs);
+hljs.registerLanguage("xml", hljsXml);
+hljs.registerLanguage("html", hljsXml);
+hljs.registerLanguage("yaml", hljsYaml);
+hljs.registerLanguage("yml", hljsYaml);
 
 type AppPage = "chat" | "imagine" | "voice" | "editor" | "ide" | "hands";
 type RightPanelMode = "workspace" | "browser";
@@ -1365,7 +1404,11 @@ function ChatPage() {
   const selectModel = useAppStore((state) => state.selectModel);
   const setComposer = useAppStore((state) => state.setComposer);
   const sendMessage = useAppStore((state) => state.sendMessage);
+  const sendAgentMessage = useAppStore((state) => state.sendAgentMessage);
   const stopStream = useAppStore((state) => state.stopStream);
+  const agentMode = useAppStore((state) => state.agentMode);
+  const toggleAgentMode = useAppStore((state) => state.toggleAgentMode);
+  const agentToolCalls = useAppStore((state) => state.agentToolCalls);
 
   const workspaceItems = activeWorkspaceId ? workspaceItemsMap[activeWorkspaceId] ?? [] : [];
   const selectedWorkspaceItems = useMemo(
@@ -1378,6 +1421,8 @@ function ChatPage() {
   );
   const xaiReady = providerStatuses.find((status) => status.providerId === "xai")?.available ?? true;
 
+  const handleSend = agentMode ? sendAgentMessage : sendMessage;
+
   return (
     <section className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
       <div className="min-h-0 overflow-y-auto px-3 py-3">
@@ -1386,6 +1431,20 @@ function ChatPage() {
             {conversation.messages.map((message) => (
               <MessageBubble key={message.id} message={message} />
             ))}
+            {agentMode && sending && agentToolCalls.length > 0 && (
+              <div className="max-w-[92%] space-y-1">
+                {agentToolCalls.map((tc, i) => (
+                  <ToolCallBlock
+                    key={`${tc.toolName}-${i}`}
+                    toolName={tc.toolName}
+                    args={tc.args}
+                    result={tc.result}
+                    success={tc.success}
+                    isRunning={tc.isRunning}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <EmptyPanel
@@ -1404,6 +1463,11 @@ function ChatPage() {
           <span className="rounded-full border border-white/7 bg-white/[0.03] px-3 py-1 font-['IBM_Plex_Mono']">
             ~{selectedTokens} tokens
           </span>
+          {agentMode && (
+            <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-3 py-1 text-violet-100">
+              Agent mode
+            </span>
+          )}
           {!xaiReady ? (
             <span className="rounded-full border border-amber-200/20 bg-amber-300/10 px-3 py-1 text-amber-100">
               xAI unavailable
@@ -1429,6 +1493,19 @@ function ChatPage() {
                 ),
               )}
             </select>
+            <button
+              type="button"
+              onClick={toggleAgentMode}
+              className={clsx(
+                "ml-auto flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-[10px] font-semibold transition",
+                agentMode
+                  ? "border-violet-300/30 bg-violet-300/15 text-violet-100 hover:bg-violet-300/22"
+                  : "border-white/8 bg-white/5 text-stone-400 hover:bg-white/10 hover:text-stone-200",
+              )}
+            >
+              <Bot className="h-3 w-3" />
+              Agent
+            </button>
           </div>
           <textarea
             value={composer}
@@ -1436,10 +1513,14 @@ function ChatPage() {
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                void sendMessage();
+                void handleSend();
               }
             }}
-            placeholder="Ask Grok about your code, workspace, build issue, or next step…"
+            placeholder={
+              agentMode
+                ? "Ask the agent to edit files, run commands, search code…"
+                : "Ask Grok about your code, workspace, build issue, or next step…"
+            }
             className="min-h-24 w-full resize-none bg-transparent px-1.5 py-1 text-[12px] leading-5 text-stone-100 outline-none placeholder:text-stone-600"
           />
           <div className="mt-1.5 flex items-center justify-between gap-3">
@@ -1456,12 +1537,17 @@ function ChatPage() {
             ) : (
               <button
                 type="button"
-                onClick={() => void sendMessage()}
+                onClick={() => void handleSend()}
                 disabled={!xaiReady}
-                className="flex items-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-1.5 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/4 disabled:text-stone-500"
+                className={clsx(
+                  "flex items-center gap-1 rounded-xl border px-3 py-1.5 text-[10px] transition disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/4 disabled:text-stone-500",
+                  agentMode
+                    ? "border-violet-300/20 bg-violet-300/12 text-violet-50 hover:bg-violet-300/20"
+                    : "border-emerald-300/20 bg-emerald-300/12 text-emerald-50 hover:bg-emerald-300/20",
+                )}
               >
-                <Send className="h-3 w-3" />
-                Send
+                {agentMode ? <Bot className="h-3 w-3" /> : <Send className="h-3 w-3" />}
+                {agentMode ? "Run Agent" : "Send"}
               </button>
             )}
           </div>
@@ -1533,9 +1619,30 @@ function MessageBubble({ message }: { message: Message }) {
 function CodeBlock({ code, language }: { code: string; language?: string }) {
   const chrome = useContext(ShellChromeContext);
   const label = (language ?? "code").toLowerCase();
+  const [copied, setCopied] = useState(false);
+  const [collapsed, setCollapsed] = useState(code.split("\n").length > 60);
+  const lineCount = code.split("\n").length;
+
+  const highlighted = useMemo(() => {
+    const lang = (language ?? "").toLowerCase();
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return hljs.highlight(code, { language: lang }).value;
+      } catch {
+        // fallback
+      }
+    }
+    try {
+      return hljs.highlightAuto(code).value;
+    } catch {
+      return null;
+    }
+  }, [code, language]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const handleDownload = () => {
@@ -1551,9 +1658,23 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
   return (
     <div className="my-4 overflow-hidden rounded-[18px] border border-white/8 bg-[#0a0d0f] shadow-[0_10px_30px_rgba(0,0,0,0.24)]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 bg-white/[0.03] px-3 py-2">
-        <span className="font-['IBM_Plex_Mono'] text-[10px] uppercase tracking-[0.18em] text-stone-400">
-          {label}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="font-['IBM_Plex_Mono'] text-[10px] uppercase tracking-[0.18em] text-stone-400">
+            {label}
+          </span>
+          <span className="font-['IBM_Plex_Mono'] text-[10px] text-stone-500">
+            {lineCount} lines
+          </span>
+          {lineCount > 60 && (
+            <button
+              type="button"
+              onClick={() => setCollapsed(!collapsed)}
+              className="text-[10px] text-sky-300/70 hover:text-sky-300"
+            >
+              {collapsed ? "Expand" : "Collapse"}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -1561,7 +1682,7 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
             className="inline-flex items-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1 text-[10px] text-stone-300 transition hover:bg-white/10"
           >
             <Copy className="h-3 w-3" />
-            Copy
+            {copied ? "Copied!" : "Copy"}
           </button>
           <button
             type="button"
@@ -1581,9 +1702,81 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
           </button>
         </div>
       </div>
-      <pre className="m-0 overflow-x-auto px-4 py-4 font-['IBM_Plex_Mono'] text-[10px] leading-6 text-stone-200">
-        <code>{code}</code>
+      <pre
+        className={clsx(
+          "m-0 overflow-x-auto px-4 py-4 font-['IBM_Plex_Mono'] text-[10px] leading-6 text-stone-200",
+          collapsed && "max-h-48 overflow-y-hidden",
+        )}
+      >
+        {highlighted ? (
+          <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+        ) : (
+          <code>{code}</code>
+        )}
       </pre>
+      {collapsed && (
+        <div className="border-t border-white/5 bg-gradient-to-t from-[#0a0d0f] to-transparent px-4 py-2 text-center">
+          <button
+            type="button"
+            onClick={() => setCollapsed(false)}
+            className="text-[10px] text-sky-300/70 hover:text-sky-300"
+          >
+            Show all {lineCount} lines
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCallBlock({ toolName, args, result, success, isRunning }: {
+  toolName: string;
+  args: string;
+  result?: string;
+  success?: boolean;
+  isRunning?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const statusColor = isRunning ? "text-amber-300" : success ? "text-emerald-300" : "text-rose-300";
+  const statusBorder = isRunning ? "border-amber-300/20" : success ? "border-emerald-300/20" : "border-rose-300/20";
+  const statusBg = isRunning ? "bg-amber-300/5" : success ? "bg-emerald-300/5" : "bg-rose-300/5";
+
+  return (
+    <div className={clsx("my-2 overflow-hidden rounded-xl border", statusBorder, statusBg)}>
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        <Code2 className={clsx("h-3 w-3 shrink-0", statusColor)} />
+        <span className={clsx("font-['IBM_Plex_Mono'] text-[10px] font-semibold", statusColor)}>
+          {toolName}
+        </span>
+        <span className="text-[10px] text-stone-500">
+          {isRunning ? "running…" : success ? "completed" : "failed"}
+        </span>
+        <ChevronRight className={clsx("ml-auto h-3 w-3 text-stone-500 transition", expanded && "rotate-90")} />
+      </button>
+      {expanded && (
+        <div className="border-t border-white/5 px-3 py-2">
+          {args && (
+            <div className="mb-2">
+              <p className="mb-1 text-[9px] uppercase tracking-wider text-stone-500">Input</p>
+              <pre className="overflow-x-auto rounded-lg bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-300">
+                {(() => { try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; } })()}
+              </pre>
+            </div>
+          )}
+          {result && (
+            <div>
+              <p className="mb-1 text-[9px] uppercase tracking-wider text-stone-500">Output</p>
+              <pre className="max-h-64 overflow-auto rounded-lg bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-300">
+                {result.length > 3000 ? `${result.slice(0, 3000)}\n\n... (truncated)` : result}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

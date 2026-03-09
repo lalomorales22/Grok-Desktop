@@ -216,6 +216,19 @@ pub struct ChatRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentChatRequest {
+    pub conversation_id: String,
+    pub provider_id: ProviderId,
+    pub model_id: String,
+    pub user_text: String,
+    pub selected_workspace_items: Vec<String>,
+    pub temperature: Option<f32>,
+    pub max_output_tokens: Option<u32>,
+    pub max_iterations: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
     pub stream_id: String,
     pub kind: String,
