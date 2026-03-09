@@ -327,3 +327,31 @@ export interface ExportEditorTimelineRequest {
   categoryId?: string | null;
   clips: EditorTimelineClip[];
 }
+
+// ---------------------------------------------------------------------------
+// Agent types
+// ---------------------------------------------------------------------------
+
+export interface AgentChatRequest {
+  conversationId: string;
+  providerId: ProviderId;
+  modelId: string;
+  userText: string;
+  selectedWorkspaceItems: string[];
+  temperature?: number;
+  maxOutputTokens?: number;
+  maxIterations?: number;
+}
+
+export interface AgentEvent {
+  streamId: string;
+  kind: "thinking" | "tool_call" | "tool_result" | "text_delta" | "complete" | "error";
+  toolName?: string | null;
+  toolArgs?: string | null;
+  toolResult?: string | null;
+  toolSuccess?: boolean | null;
+  textDelta?: string | null;
+  messageId?: string | null;
+  iterations?: number | null;
+  error?: string | null;
+}
