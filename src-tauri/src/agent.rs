@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::types::TokenUsage;
@@ -234,6 +236,9 @@ pub async fn run_agent(
             message: format!("Iteration {}", iterations),
         });
 
+        // -- Prune context if approaching model limits -----------------------
+        crate::providers::prune_context(&mut messages, &config.model_id, 8);
+
         // -- Build the request body -----------------------------------------
         let mut request_body = serde_json::json!({
             "model": config.model_id,
@@ -304,53 +309,112 @@ pub async fn run_agent(
                 );
                 messages.push(assistant_msg);
 
-                // Execute each tool call sequentially.
+                // Emit all tool call events first
                 for call in calls {
-                    // Check cancellation between tool executions.
-                    if cancel.is_cancelled() {
-                        return Err(AppError::message("cancelled"));
-                    }
-
                     let _ = on_event(AgentEvent::ToolCall {
                         tool_name: call.function.name.clone(),
                         tool_input: call.function.arguments.clone(),
                         call_id: call.id.clone(),
                     });
+                }
 
-                    // Parse arguments from JSON string to Value.
-                    let args: Value =
-                        serde_json::from_str(&call.function.arguments).unwrap_or(Value::Object(
-                            serde_json::Map::new(),
-                        ));
+                // Determine if we can execute tools in parallel.
+                // Sub-agent tools (spawn_agent, spawn_agents_parallel) are
+                // handled as placeholders here—the caller (lib.rs / agent_manager)
+                // can intercept them for actual sub-agent dispatch.
+                let parallel = calls.len() > 1;
 
-                    let tool_result = tools.execute(&call.function.name, args).await;
+                if parallel {
+                    // Execute all tool calls concurrently
+                    let tool_futures: Vec<_> = calls
+                        .iter()
+                        .map(|call| {
+                            let name = call.function.name.clone();
+                            let args: Value = serde_json::from_str(&call.function.arguments)
+                                .unwrap_or(Value::Object(serde_json::Map::new()));
+                            let tools_ref = tools.clone();
+                            async move {
+                                let result = tools_ref.execute(&name, args).await;
+                                (call.id.clone(), name, call.function.arguments.clone(), result)
+                            }
+                        })
+                        .collect();
 
-                    let (success, output) = match tool_result {
-                        Ok(output) => (true, output),
-                        Err(err) => (false, format!("Tool error: {err}")),
-                    };
+                    let results = futures_util::future::join_all(tool_futures).await;
 
-                    let _ = on_event(AgentEvent::ToolResult {
-                        call_id: call.id.clone(),
-                        tool_name: call.function.name.clone(),
-                        success,
-                        output: truncate_for_event(&output, 2000),
-                    });
+                    for (call_id, tool_name, arguments, result) in results {
+                        if cancel.is_cancelled() {
+                            return Err(AppError::message("cancelled"));
+                        }
 
-                    tool_call_records.push(ToolCallRecord {
-                        call_id: call.id.clone(),
-                        tool_name: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        result: output.clone(),
-                        success,
-                    });
+                        let success = result.success;
+                        let output = if result.success {
+                            result.output
+                        } else {
+                            format!("Tool error: {}", result.error.unwrap_or_default())
+                        };
 
-                    // Append the tool result message for the model.
-                    messages.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": output,
-                    }));
+                        let _ = on_event(AgentEvent::ToolResult {
+                            call_id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            success,
+                            output: truncate_for_event(&output, 2000),
+                        });
+
+                        tool_call_records.push(ToolCallRecord {
+                            call_id: call_id.clone(),
+                            tool_name,
+                            arguments,
+                            result: output.clone(),
+                            success,
+                        });
+
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output,
+                        }));
+                    }
+                } else {
+                    // Execute single tool call (or sequential for sub-agent calls)
+                    for call in calls {
+                        if cancel.is_cancelled() {
+                            return Err(AppError::message("cancelled"));
+                        }
+
+                        let args: Value = serde_json::from_str(&call.function.arguments)
+                            .unwrap_or(Value::Object(serde_json::Map::new()));
+
+                        let result = tools.execute(&call.function.name, args).await;
+
+                        let success = result.success;
+                        let output = if result.success {
+                            result.output
+                        } else {
+                            format!("Tool error: {}", result.error.unwrap_or_default())
+                        };
+
+                        let _ = on_event(AgentEvent::ToolResult {
+                            call_id: call.id.clone(),
+                            tool_name: call.function.name.clone(),
+                            success,
+                            output: truncate_for_event(&output, 2000),
+                        });
+
+                        tool_call_records.push(ToolCallRecord {
+                            call_id: call.id.clone(),
+                            tool_name: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            result: output.clone(),
+                            success,
+                        });
+
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": output,
+                        }));
+                    }
                 }
 
                 // Continue the loop -- the model will see the tool results.

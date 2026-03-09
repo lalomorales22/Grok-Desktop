@@ -65,6 +65,21 @@ pub struct ProviderStatus {
     pub error: Option<String>,
 }
 
+/// The type of task a model is best suited for. Used by the model router to
+/// automatically select the right model for a given job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    /// High-level planning and task decomposition.
+    Planning,
+    /// Writing or editing code.
+    CodeGeneration,
+    /// Fast, short answers / simple chat.
+    QuickAnswer,
+    /// Complex multi-step reasoning.
+    Reasoning,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDescriptor {
@@ -73,6 +88,12 @@ pub struct ModelDescriptor {
     pub label: String,
     pub supports_streaming: bool,
     pub supports_workspace_context: bool,
+    /// Context window size in tokens (for context management).
+    pub context_window: u64,
+    /// Default max output tokens for this model.
+    pub default_max_output: u32,
+    /// Which task types this model is recommended for.
+    pub capabilities: Vec<TaskType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

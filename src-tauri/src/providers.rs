@@ -13,7 +13,7 @@ use crate::keychain::SecretStore;
 use crate::types::Message;
 use crate::types::{
     GenerateImageRequest, GenerateVideoRequest, MediaAsset, ModelDescriptor, ProviderId,
-    RealtimeSession, RealtimeSessionRequest, TextToSpeechRequest, TokenUsage,
+    RealtimeSession, RealtimeSessionRequest, TaskType, TextToSpeechRequest, TokenUsage,
 };
 
 const XAI_CHAT_ENDPOINT: &str = "https://api.x.ai/v1/chat/completions";
@@ -94,14 +94,19 @@ impl ProviderService {
                 }),
         );
 
-        let mut request_body = serde_json::json!({
+        // Prune context if approaching the model's context window limit.
+        // Keep the 10 most recent messages to preserve conversational coherence.
+        prune_context(&mut messages, model_id, 10);
+
+        let effective_max_tokens = max_output_tokens
+            .unwrap_or_else(|| model_default_max_output(model_id));
+        let request_body = serde_json::json!({
             "model": model_id,
             "stream": true,
             "messages": messages,
+            "max_tokens": effective_max_tokens,
+            "stream_options": { "include_usage": true },
         });
-        if let Some(max_tokens) = max_output_tokens {
-            request_body["max_tokens"] = serde_json::json!(max_tokens);
-        }
 
         let response = self
             .client
@@ -462,25 +467,213 @@ impl ProviderService {
 }
 
 fn chat_models() -> Vec<ModelDescriptor> {
-    [
-        "grok-4-1-fast-reasoning",
-        "grok-4-1-fast-non-reasoning",
-        "grok-code-fast-1",
-        "grok-4-fast-reasoning",
-        "grok-4-fast-non-reasoning",
-        "grok-4-0709",
-        "grok-3-mini",
-        "grok-3",
+    vec![
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-4-1-fast-reasoning".into(),
+            label: "Grok 4.1 Fast Reasoning".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 16_384,
+            capabilities: vec![TaskType::Planning, TaskType::Reasoning],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-4-1-fast-non-reasoning".into(),
+            label: "Grok 4.1 Fast".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 16_384,
+            capabilities: vec![TaskType::QuickAnswer],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-code-fast-1".into(),
+            label: "Grok Code Fast".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 32_768,
+            capabilities: vec![TaskType::CodeGeneration],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-4-fast-reasoning".into(),
+            label: "Grok 4 Fast Reasoning".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 16_384,
+            capabilities: vec![TaskType::Planning, TaskType::Reasoning],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-4-fast-non-reasoning".into(),
+            label: "Grok 4 Fast".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 16_384,
+            capabilities: vec![TaskType::QuickAnswer],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-4-0709".into(),
+            label: "Grok 4 (0709)".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 32_768,
+            capabilities: vec![TaskType::Reasoning, TaskType::CodeGeneration],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-3-mini".into(),
+            label: "Grok 3 Mini".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 8_192,
+            capabilities: vec![TaskType::QuickAnswer],
+        },
+        ModelDescriptor {
+            provider_id: ProviderId::Xai,
+            model_id: "grok-3".into(),
+            label: "Grok 3".into(),
+            supports_streaming: true,
+            supports_workspace_context: true,
+            context_window: 131_072,
+            default_max_output: 16_384,
+            capabilities: vec![TaskType::Reasoning, TaskType::CodeGeneration, TaskType::Planning],
+        },
     ]
-    .into_iter()
-    .map(|model_id| ModelDescriptor {
-        provider_id: ProviderId::Xai,
-        model_id: model_id.into(),
-        label: model_id.into(),
-        supports_streaming: true,
-        supports_workspace_context: true,
-    })
-    .collect()
+}
+
+/// Select the best model for a given task type. Returns the model_id of the
+/// first model whose capabilities include the requested task type.
+pub fn route_model(task_type: TaskType) -> String {
+    let models = chat_models();
+    models
+        .iter()
+        .find(|m| m.capabilities.contains(&task_type))
+        .map(|m| m.model_id.clone())
+        .unwrap_or_else(|| "grok-4-1-fast-reasoning".into())
+}
+
+/// Look up a model's context window size.
+pub fn model_context_window(model_id: &str) -> u64 {
+    let models = chat_models();
+    models
+        .iter()
+        .find(|m| m.model_id == model_id)
+        .map(|m| m.context_window)
+        .unwrap_or(131_072)
+}
+
+/// Look up a model's default max output tokens.
+pub fn model_default_max_output(model_id: &str) -> u32 {
+    let models = chat_models();
+    models
+        .iter()
+        .find(|m| m.model_id == model_id)
+        .map(|m| m.default_max_output)
+        .unwrap_or(16_384)
+}
+
+// ---------------------------------------------------------------------------
+// Context window management
+// ---------------------------------------------------------------------------
+
+/// Rough estimate of tokens in a string (approx 4 chars per token for English).
+fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64 + 3) / 4
+}
+
+/// Estimate token count for a slice of messages in OpenAI JSON format.
+pub fn estimate_message_tokens(messages: &[Value]) -> u64 {
+    let mut total: u64 = 0;
+    for msg in messages {
+        // Each message has ~4 tokens of overhead (role, delimiters)
+        total += 4;
+        if let Some(content) = msg.get("content").and_then(Value::as_str) {
+            total += estimate_tokens(content);
+        }
+        // Tool calls add overhead too
+        if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                total += 4; // call overhead
+                if let Some(args) = call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                {
+                    total += estimate_tokens(args);
+                }
+            }
+        }
+    }
+    total
+}
+
+/// When the conversation history approaches the context window limit, prune
+/// older messages while preserving the system prompt (first message) and the
+/// most recent `keep_recent` messages. Middle messages are replaced with a
+/// single summary message.
+pub fn prune_context(
+    messages: &mut Vec<Value>,
+    model_id: &str,
+    keep_recent: usize,
+) {
+    let window = model_context_window(model_id);
+    // Leave room for output tokens + some buffer
+    let max_input = window.saturating_sub(model_default_max_output(model_id) as u64 + 1024);
+
+    let current_tokens = estimate_message_tokens(messages);
+    if current_tokens <= max_input {
+        return; // fits fine
+    }
+
+    // Need to prune. Keep system prompt (index 0) and the last `keep_recent` messages.
+    if messages.len() <= keep_recent + 1 {
+        return; // nothing to prune
+    }
+
+    let prune_end = messages.len().saturating_sub(keep_recent);
+    if prune_end <= 1 {
+        return;
+    }
+
+    // Summarize the pruned section
+    let mut summary_parts: Vec<String> = Vec::new();
+    for msg in &messages[1..prune_end] {
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or("unknown");
+        if let Some(content) = msg.get("content").and_then(Value::as_str) {
+            let truncated = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content.to_string()
+            };
+            summary_parts.push(format!("[{role}]: {truncated}"));
+        }
+    }
+
+    let summary = format!(
+        "[Context summary — {} earlier messages condensed]\n{}",
+        prune_end - 1,
+        summary_parts.join("\n")
+    );
+
+    // Remove the pruned messages and insert summary
+    messages.drain(1..prune_end);
+    messages.insert(
+        1,
+        serde_json::json!({
+            "role": "system",
+            "content": summary,
+        }),
+    );
 }
 
 fn find_video_url(json: &Value) -> Option<String> {

@@ -126,7 +126,40 @@ impl Database {
             );
             "#,
         )?;
+        // Phase 2: Agent tables
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS agents (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL,
+              parent_agent_id TEXT,
+              task_description TEXT NOT NULL,
+              model_id TEXT NOT NULL,
+              state TEXT NOT NULL DEFAULT 'idle',
+              iterations INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              completed_at TEXT,
+              result_summary TEXT,
+              FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS agent_tool_calls (
+              id TEXT PRIMARY KEY,
+              message_id TEXT NOT NULL,
+              agent_id TEXT NOT NULL,
+              tool_name TEXT NOT NULL,
+              tool_input TEXT NOT NULL,
+              tool_result TEXT,
+              success INTEGER,
+              status TEXT NOT NULL DEFAULT 'pending',
+              started_at TEXT,
+              completed_at TEXT,
+              duration_ms INTEGER,
+              FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+            );
+            "#,
+        )?;
         ensure_column(&conn, "messages", "tool_calls_json", "TEXT")?;
+        ensure_column(&conn, "messages", "agent_id", "TEXT")?;
         ensure_column(&conn, "settings", "xai_model", "TEXT")?;
         ensure_column(&conn, "settings", "xai_image_model", "TEXT")?;
         ensure_column(&conn, "settings", "xai_video_model", "TEXT")?;
@@ -550,6 +583,107 @@ impl Database {
             params![message_id, tool_calls_json],
         )?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent persistence (Phase 2)
+    // -----------------------------------------------------------------------
+
+    pub fn insert_agent(
+        &self,
+        conversation_id: &str,
+        parent_agent_id: Option<&str>,
+        task_description: &str,
+        model_id: &str,
+    ) -> AppResult<String> {
+        let conn = self.connect()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agents (id, conversation_id, parent_agent_id, task_description, model_id, state, iterations, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'idle', 0, ?6)",
+            params![id, conversation_id, parent_agent_id, task_description, model_id, now],
+        )?;
+        Ok(id)
+    }
+
+    pub fn update_agent_state(
+        &self,
+        agent_id: &str,
+        state: &str,
+        iterations: Option<usize>,
+        result_summary: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        let now = Utc::now().to_rfc3339();
+        let completed_at = if matches!(state, "complete" | "error" | "cancelled") {
+            Some(now)
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE agents SET state = ?2, iterations = COALESCE(?3, iterations), result_summary = COALESCE(?4, result_summary), completed_at = COALESCE(?5, completed_at) WHERE id = ?1",
+            params![
+                agent_id,
+                state,
+                iterations.map(|i| i as i64),
+                result_summary,
+                completed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_agent_tool_call(
+        &self,
+        message_id: &str,
+        agent_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> AppResult<String> {
+        let conn = self.connect()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agent_tool_calls (id, message_id, agent_id, tool_name, tool_input, status, started_at) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+            params![id, message_id, agent_id, tool_name, tool_input, now],
+        )?;
+        Ok(id)
+    }
+
+    pub fn complete_agent_tool_call(
+        &self,
+        tool_call_id: &str,
+        tool_result: &str,
+        success: bool,
+        duration_ms: i64,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE agent_tool_calls SET tool_result = ?2, success = ?3, status = 'complete', completed_at = ?4, duration_ms = ?5 WHERE id = ?1",
+            params![tool_call_id, tool_result, success as i64, now, duration_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_agents_for_conversation(&self, conversation_id: &str) -> AppResult<Vec<(String, Option<String>, String, String, String, i64)>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_agent_id, task_description, model_id, state, iterations FROM agents WHERE conversation_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn create_workspace(&self, input: NewWorkspace) -> AppResult<Workspace> {

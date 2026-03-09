@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AgentChatRequest,
   AgentEvent,
+  AgentInfo,
   ChatRequest,
   Conversation,
   ConversationDetail,
@@ -37,6 +38,7 @@ import type {
   WorkspaceItem,
   WorkspaceScanEvent,
   WorkspaceScanSummary,
+  ManagerEvent,
 } from "../types";
 
 export const api = {
@@ -116,6 +118,8 @@ export const api = {
     invoke<RealtimeSession>("create_realtime_session_command", { input }),
   sendAgentMessage: (input: AgentChatRequest) =>
     invoke<StreamHandle>("send_agent_message", { input }),
+  listActiveAgents: () => invoke<AgentInfo[]>("list_active_agents"),
+  cancelAgent: (agentId: string) => invoke<void>("cancel_agent", { agentId }),
   startTerminal: () => invoke<TerminalHandle>("start_terminal"),
   writeTerminalInput: (sessionId: string, input: string) =>
     invoke<void>("write_terminal_input", { sessionId, input }),
@@ -138,4 +142,6 @@ export const events = {
     listen<HandsStatus>("hands://status", ({ payload }) => handler(payload)),
   onAgent: (handler: (event: AgentEvent) => void) =>
     listen<AgentEvent>("agent://event", ({ payload }) => handler(payload)),
+  onManagerEvent: (handler: (event: ManagerEvent) => void) =>
+    listen<ManagerEvent>("agent://manager", ({ payload }) => handler(payload)),
 };

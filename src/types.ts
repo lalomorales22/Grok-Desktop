@@ -7,12 +7,17 @@ export interface ProviderStatus {
   error?: string | null;
 }
 
+export type TaskType = "planning" | "code_generation" | "quick_answer" | "reasoning";
+
 export interface ModelDescriptor {
   providerId: ProviderId;
   modelId: string;
   label: string;
   supportsStreaming: boolean;
   supportsWorkspaceContext: boolean;
+  contextWindow: number;
+  defaultMaxOutput: number;
+  capabilities: TaskType[];
 }
 
 export interface Settings {
@@ -354,4 +359,58 @@ export interface AgentEvent {
   messageId?: string | null;
   iterations?: number | null;
   error?: string | null;
+}
+
+export type AgentState =
+  | "idle"
+  | "planning"
+  | "executing"
+  | "awaiting_tool"
+  | "awaiting_subagent"
+  | "reviewing"
+  | "complete"
+  | "error"
+  | "cancelled";
+
+export interface AgentInfo {
+  id: string;
+  parentId?: string | null;
+  taskDescription: string;
+  modelId: string;
+  state: AgentState;
+  iterations: number;
+  toolCalls: AgentToolCallRecord[];
+  resultSummary?: string | null;
+  children: string[];
+}
+
+export interface AgentToolCallRecord {
+  callId: string;
+  toolName: string;
+  arguments: string;
+  result: string;
+  success: boolean;
+}
+
+export interface ManagerEvent {
+  kind:
+    | "agent_spawned"
+    | "agent_state_changed"
+    | "agent_tool_call"
+    | "agent_tool_result"
+    | "agent_text_delta"
+    | "agent_complete"
+    | "agent_error";
+  agentId?: string | null;
+  agent?: AgentInfo | null;
+  state?: AgentState | null;
+  toolName?: string | null;
+  toolInput?: string | null;
+  callId?: string | null;
+  success?: boolean | null;
+  output?: string | null;
+  text?: string | null;
+  resultSummary?: string | null;
+  iterations?: number | null;
+  message?: string | null;
 }

@@ -1,4 +1,5 @@
 mod agent;
+mod agent_manager;
 mod db;
 mod editor;
 mod error;
@@ -47,6 +48,7 @@ struct AppState {
     streams: Mutex<std::collections::HashMap<String, CancellationToken>>,
     terminals: TerminalRegistry,
     hands: HandsService,
+    agent_mgr: agent_manager::AgentManager,
 }
 
 #[tauri::command]
@@ -687,6 +689,22 @@ fn cancel_stream(state: State<'_, AppState>, stream_id: String) -> Result<(), St
 }
 
 #[tauri::command]
+async fn list_active_agents(
+    state: State<'_, AppState>,
+) -> Result<Vec<agent_manager::AgentInfo>, String> {
+    Ok(state.agent_mgr.list_agents().await)
+}
+
+#[tauri::command]
+async fn cancel_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<(), String> {
+    state.agent_mgr.cancel_agent(&agent_id).await;
+    Ok(())
+}
+
+#[tauri::command]
 async fn send_agent_message(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1268,6 +1286,7 @@ pub fn run() {
             streams: Mutex::new(std::collections::HashMap::new()),
             terminals: Mutex::new(std::collections::HashMap::new()),
             hands: HandsService::new(database.clone(), providers),
+            agent_mgr: agent_manager::AgentManager::new(5, 100),
         })
         .setup(move |app| {
             configure_window(app)?;
@@ -1292,6 +1311,8 @@ pub fn run() {
             delete_conversation,
             send_message,
             send_agent_message,
+            list_active_agents,
+            cancel_agent,
             cancel_stream,
             start_terminal,
             write_terminal_input,

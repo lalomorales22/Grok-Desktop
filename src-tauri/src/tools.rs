@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use futures_util::future;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::process::Command;
@@ -48,7 +49,7 @@ impl ToolRegistry {
 
     /// Returns all tool definitions for the xAI / OpenAI function-calling API.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
+        let mut defs = vec![
             def_read_file(),
             def_write_file(),
             def_edit_file(),
@@ -62,25 +63,45 @@ impl ToolRegistry {
             def_git_commit(),
             def_mkdir(),
             def_touch(),
-        ]
+        ];
+        // Phase 2: sub-agent spawning tools
+        defs.push(def_spawn_agent());
+        defs.push(def_spawn_agents_parallel());
+        defs
+    }
+
+    /// Returns the workspace roots (for sub-agent spawning).
+    pub fn workspace_roots(&self) -> &[String] {
+        &self.workspace_roots
     }
 
     /// Execute a tool by name, dispatching to the appropriate handler.
-    pub async fn execute(&self, tool_name: &str, arguments: &Value) -> ToolResult {
+    /// Returns `None` for tools that must be handled externally (sub-agent spawning).
+    pub async fn execute(&self, tool_name: &str, arguments: Value) -> ToolResult {
+        // Sub-agent tools are handled by the agent loop, not here.
+        if tool_name == "spawn_agent" || tool_name == "spawn_agents_parallel" {
+            return ToolResult {
+                tool_name: tool_name.to_string(),
+                success: true,
+                output: "__SUBAGENT_PENDING__".to_string(),
+                error: None,
+            };
+        }
+
         let result = match tool_name {
-            "read_file" => self.exec_read_file(arguments).await,
-            "write_file" => self.exec_write_file(arguments).await,
-            "edit_file" => self.exec_edit_file(arguments).await,
-            "list_directory" => self.exec_list_directory(arguments).await,
-            "search_files" => self.exec_search_files(arguments).await,
-            "grep" => self.exec_grep(arguments).await,
-            "bash" => self.exec_bash(arguments).await,
-            "git_status" => self.exec_git_status(arguments).await,
-            "git_diff" => self.exec_git_diff(arguments).await,
-            "git_log" => self.exec_git_log(arguments).await,
-            "git_commit" => self.exec_git_commit(arguments).await,
-            "mkdir" => self.exec_mkdir(arguments).await,
-            "touch" => self.exec_touch(arguments).await,
+            "read_file" => self.exec_read_file(&arguments).await,
+            "write_file" => self.exec_write_file(&arguments).await,
+            "edit_file" => self.exec_edit_file(&arguments).await,
+            "list_directory" => self.exec_list_directory(&arguments).await,
+            "search_files" => self.exec_search_files(&arguments).await,
+            "grep" => self.exec_grep(&arguments).await,
+            "bash" => self.exec_bash(&arguments).await,
+            "git_status" => self.exec_git_status(&arguments).await,
+            "git_diff" => self.exec_git_diff(&arguments).await,
+            "git_log" => self.exec_git_log(&arguments).await,
+            "git_commit" => self.exec_git_commit(&arguments).await,
+            "mkdir" => self.exec_mkdir(&arguments).await,
+            "touch" => self.exec_touch(&arguments).await,
             _ => Err(AppError::message(format!("unknown tool: {tool_name}"))),
         };
 
@@ -98,6 +119,18 @@ impl ToolRegistry {
                 error: Some(err.to_string()),
             },
         }
+    }
+
+    /// Execute multiple tools in parallel. Returns results in the same order.
+    pub async fn execute_parallel(&self, calls: Vec<(String, Value)>) -> Vec<ToolResult> {
+        let futures: Vec<_> = calls
+            .into_iter()
+            .map(|(name, args)| {
+                let registry = self.clone();
+                async move { registry.execute(&name, args).await }
+            })
+            .collect();
+        futures_util::future::join_all(futures).await
     }
 
     // -----------------------------------------------------------------------
@@ -936,6 +969,58 @@ fn def_touch() -> ToolDefinition {
     }
 }
 
+fn def_spawn_agent() -> ToolDefinition {
+    ToolDefinition {
+        name: "spawn_agent".into(),
+        description: "Spawn a sub-agent to handle a specific task independently. The sub-agent has full access to the workspace tools and runs autonomously. Returns the sub-agent's final result.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "A clear description of the task for the sub-agent to perform"
+                },
+                "model_id": {
+                    "type": "string",
+                    "description": "Optional model to use for the sub-agent. Defaults to the parent agent's model."
+                }
+            },
+            "required": ["task"]
+        }),
+    }
+}
+
+fn def_spawn_agents_parallel() -> ToolDefinition {
+    ToolDefinition {
+        name: "spawn_agents_parallel".into(),
+        description: "Spawn multiple sub-agents to work on tasks simultaneously. Each task runs as an independent agent with full tool access. Returns all results when every sub-agent finishes.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "Task description for this sub-agent"
+                            },
+                            "model_id": {
+                                "type": "string",
+                                "description": "Optional model for this sub-agent"
+                            }
+                        },
+                        "required": ["task"]
+                    },
+                    "description": "Array of task objects to execute in parallel"
+                }
+            },
+            "required": ["tasks"]
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -981,7 +1066,7 @@ mod tests {
     #[tokio::test]
     async fn execute_unknown_tool_returns_error() {
         let registry = ToolRegistry::new(vec!["/tmp".into()]);
-        let result = registry.execute("nonexistent", &json!({})).await;
+        let result = registry.execute("nonexistent", json!({})).await;
         assert!(!result.success);
         assert!(result.error.is_some());
     }
@@ -997,7 +1082,7 @@ mod tests {
         let result = registry
             .execute(
                 "read_file",
-                &json!({ "path": file.to_str().unwrap() }),
+                json!({ "path": file.to_str().unwrap() }),
             )
             .await;
         assert!(result.success);
@@ -1013,7 +1098,7 @@ mod tests {
         let result = registry
             .execute(
                 "bash",
-                &json!({
+                json!({
                     "command": "sleep 30",
                     "timeout_ms": 1000
                 }),

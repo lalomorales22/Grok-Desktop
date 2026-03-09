@@ -54,7 +54,7 @@ import remarkGfm from "remark-gfm";
 import { Terminal as XTerm } from "xterm";
 import { api, events } from "./lib/tauri";
 import { useAppStore } from "./store/appStore";
-import type { MediaAsset, Message, Settings, StreamEvent, WorkspaceItem, WorkspaceMediaFile } from "./types";
+import type { AgentInfo, MediaAsset, Message, Settings, StreamEvent, WorkspaceItem, WorkspaceMediaFile } from "./types";
 
 // Register highlight.js languages
 hljs.registerLanguage("bash", hljsBash);
@@ -82,7 +82,7 @@ hljs.registerLanguage("yaml", hljsYaml);
 hljs.registerLanguage("yml", hljsYaml);
 
 type AppPage = "chat" | "imagine" | "voice" | "editor" | "ide" | "hands";
-type RightPanelMode = "workspace" | "browser";
+type RightPanelMode = "workspace" | "browser" | "agents";
 type DragMode = "left" | "right" | "footer";
 
 interface DragState {
@@ -1777,6 +1777,113 @@ function ToolCallBlock({ toolName, args, result, success, isRunning }: {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function AgentActivityPanel() {
+  const agentTree = useAppStore((state) => state.agentTree);
+  const cancelAgent = useAppStore((state) => state.cancelAgent);
+  if (agentTree.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center px-4">
+        <p className="text-center text-[11px] text-stone-500">
+          No active agents. Toggle Agent mode in the chat and send a message to spawn agents.
+        </p>
+      </div>
+    );
+  }
+
+  const stateColor = (state: string) => {
+    switch (state) {
+      case "executing":
+      case "awaiting_tool":
+        return "text-amber-300";
+      case "awaiting_subagent":
+      case "planning":
+        return "text-sky-300";
+      case "complete":
+        return "text-emerald-300";
+      case "error":
+      case "cancelled":
+        return "text-rose-300";
+      default:
+        return "text-stone-400";
+    }
+  };
+
+  const stateBg = (state: string) => {
+    switch (state) {
+      case "executing":
+      case "awaiting_tool":
+        return "border-amber-300/20 bg-amber-300/5";
+      case "complete":
+        return "border-emerald-300/20 bg-emerald-300/5";
+      case "error":
+      case "cancelled":
+        return "border-rose-300/20 bg-rose-300/5";
+      default:
+        return "border-white/8 bg-white/[0.03]";
+    }
+  };
+
+  const rootAgents = agentTree.filter((a) => !a.parentId);
+  const childMap = new Map<string, AgentInfo[]>();
+  for (const a of agentTree) {
+    if (a.parentId) {
+      const children = childMap.get(a.parentId) ?? [];
+      children.push(a);
+      childMap.set(a.parentId, children);
+    }
+  }
+
+  const renderAgent = (agent: AgentInfo, depth: number) => (
+    <div key={agent.id} style={{ marginLeft: depth * 12 }}>
+      <div className={clsx("mb-1.5 rounded-xl border p-2", stateBg(agent.state))}>
+        <div className="flex items-center gap-2">
+          <Bot className={clsx("h-3 w-3 shrink-0", stateColor(agent.state))} />
+          <span className="flex-1 truncate text-[10px] text-stone-200">
+            {agent.taskDescription.slice(0, 80)}
+            {agent.taskDescription.length > 80 ? "…" : ""}
+          </span>
+          {!["complete", "error", "cancelled"].includes(agent.state) && (
+            <button
+              type="button"
+              onClick={() => void cancelAgent(agent.id)}
+              className="shrink-0 rounded-lg border border-rose-300/20 bg-rose-300/10 px-1.5 py-0.5 text-[9px] text-rose-200 hover:bg-rose-300/20"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+        <div className="mt-1 flex items-center gap-2 text-[9px]">
+          <span className={stateColor(agent.state)}>{agent.state}</span>
+          <span className="text-stone-500">
+            {agent.iterations} iter · {agent.toolCalls?.length ?? 0} tools
+          </span>
+          <span className="font-['IBM_Plex_Mono'] text-stone-500">{agent.modelId}</span>
+        </div>
+        {agent.resultSummary && (
+          <p className="mt-1 truncate text-[9px] text-stone-400">
+            {agent.resultSummary.slice(0, 120)}
+          </p>
+        )}
+      </div>
+      {(childMap.get(agent.id) ?? []).map((child) => renderAgent(child, depth + 1))}
+    </div>
+  );
+
+  return (
+    <div className="h-full overflow-y-auto px-2 py-2">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-400">
+          Agent Activity
+        </h3>
+        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[9px] text-stone-500">
+          {agentTree.filter((a) => !["complete", "error", "cancelled"].includes(a.state)).length} active
+        </span>
+      </div>
+      {rootAgents.map((agent) => renderAgent(agent, 0))}
     </div>
   );
 }
@@ -3770,37 +3877,56 @@ function RightSidebar({
     <aside className="flex min-h-0 flex-col bg-[linear-gradient(180deg,rgba(10,11,13,0.98),rgba(7,8,10,0.95))]">
       <div className="border-b border-white/6 px-3 py-3">
         <p className="text-[10px] uppercase tracking-[0.35em] text-[#84a09b]">Right Sidebar</p>
-        <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="mt-3 grid grid-cols-3 gap-2">
           <button
             type="button"
             onClick={() => onSelectMode("workspace")}
             className={clsx(
-              "inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+              "inline-flex items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-[10px] transition",
               mode === "workspace"
                 ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
                 : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
             )}
           >
-            <Files className="h-3.5 w-3.5" />
-            Workspace
+            <Files className="h-3 w-3" />
+            Files
           </button>
           <button
             type="button"
             onClick={() => onSelectMode("browser")}
             className={clsx(
-              "inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition",
+              "inline-flex items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-[10px] transition",
               mode === "browser"
                 ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
                 : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
             )}
           >
-            <Globe className="h-3.5 w-3.5" />
+            <Globe className="h-3 w-3" />
             Browser
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectMode("agents")}
+            className={clsx(
+              "inline-flex items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-[10px] transition",
+              mode === "agents"
+                ? "border-violet-300/20 bg-violet-300/12 text-violet-50"
+                : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+            )}
+          >
+            <Bot className="h-3 w-3" />
+            Agents
           </button>
         </div>
       </div>
       <div className="min-h-0 flex-1">
-        {mode === "workspace" ? <WorkspaceDrawer page={page} /> : <BrowserPanel />}
+        {mode === "workspace" ? (
+          <WorkspaceDrawer page={page} />
+        ) : mode === "agents" ? (
+          <AgentActivityPanel />
+        ) : (
+          <BrowserPanel />
+        )}
       </div>
     </aside>
   );

@@ -4,9 +4,11 @@ import { api, events } from "../lib/tauri";
 import type {
   AgentChatRequest,
   AgentEvent,
+  AgentInfo,
   ChatRequest,
   ConversationDetail,
   ConversationSummary,
+  ManagerEvent,
   MediaAsset,
   MediaCategory,
   ModelDescriptor,
@@ -75,6 +77,8 @@ interface AppState {
     success?: boolean;
     isRunning: boolean;
   }>;
+  agentTree: AgentInfo[];
+  agentPanelOpen: boolean;
   initialize: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   refreshProviderStatus: () => Promise<void>;
@@ -95,6 +99,9 @@ interface AppState {
   sendMessage: () => Promise<void>;
   sendAgentMessage: () => Promise<void>;
   toggleAgentMode: () => void;
+  toggleAgentPanel: () => void;
+  cancelAgent: (agentId: string) => Promise<void>;
+  refreshAgentTree: () => Promise<void>;
   stopStream: () => Promise<void>;
   toggleSettings: (value?: boolean) => void;
   saveSettings: (next: Partial<Settings>) => Promise<void>;
@@ -215,6 +222,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   handsBusy: false,
   agentMode: false,
   agentToolCalls: [],
+  agentTree: [],
+  agentPanelOpen: false,
 
   initialize: async () => {
     try {
@@ -382,6 +391,42 @@ export const useAppStore = create<AppState>((set, get) => ({
                 sending: false,
                 activeStreamId: undefined,
                 error: event.error ?? "Agent execution failed.",
+              };
+            }
+
+            return {};
+          });
+        });
+
+        await events.onManagerEvent((event: ManagerEvent) => {
+          set((state) => {
+            if (event.kind === "agent_spawned" && event.agent) {
+              return { agentTree: [...state.agentTree, event.agent] };
+            }
+
+            if (event.kind === "agent_state_changed" && event.agentId && event.state) {
+              return {
+                agentTree: state.agentTree.map((a) =>
+                  a.id === event.agentId ? { ...a, state: event.state! } : a,
+                ),
+              };
+            }
+
+            if (event.kind === "agent_complete" && event.agentId) {
+              return {
+                agentTree: state.agentTree.map((a) =>
+                  a.id === event.agentId
+                    ? { ...a, state: "complete" as const, resultSummary: event.resultSummary, iterations: event.iterations ?? a.iterations }
+                    : a,
+                ),
+              };
+            }
+
+            if (event.kind === "agent_error" && event.agentId) {
+              return {
+                agentTree: state.agentTree.map((a) =>
+                  a.id === event.agentId ? { ...a, state: "error" as const } : a,
+                ),
               };
             }
 
@@ -593,7 +638,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedWorkspaceItems: Object.entries(state.workspaceSelection)
         .filter(([, selected]) => selected)
         .map(([itemId]) => itemId),
-      maxOutputTokens: 2048,
     };
 
     set({ sending: true, error: undefined, composer: "" });
@@ -629,7 +673,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedWorkspaceItems: Object.entries(state.workspaceSelection)
         .filter(([, selected]) => selected)
         .map(([itemId]) => itemId),
-      maxOutputTokens: 4096,
       maxIterations: 25,
     };
 
@@ -641,6 +684,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   toggleAgentMode: () => set((state) => ({ agentMode: !state.agentMode })),
+
+  toggleAgentPanel: () => set((state) => ({ agentPanelOpen: !state.agentPanelOpen })),
+
+  cancelAgent: async (agentId) => {
+    try {
+      await api.cancelAgent(agentId);
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : "Failed to cancel agent." });
+    }
+  },
+
+  refreshAgentTree: async () => {
+    try {
+      const agentTree = await api.listActiveAgents();
+      set({ agentTree });
+    } catch {
+      // Agent tree is optional — silent failure
+    }
+  },
 
   stopStream: async () => {
     const streamId = get().activeStreamId;
