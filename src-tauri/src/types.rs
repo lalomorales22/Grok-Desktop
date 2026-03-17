@@ -108,7 +108,7 @@ impl Default for Settings {
             xai_voice_name: Some("eve".into()),
             hands_tunnel_provider: Some("relay".into()),
             hands_tunnel_executable: None,
-            hands_relay_url: Some("http://127.0.0.1:8787".into()),
+            hands_relay_url: None,
             hands_relay_machine_id: None,
             hands_relay_desktop_token: None,
         }

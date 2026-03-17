@@ -21,7 +21,8 @@ use keychain::{MigratingSecretStore, SecretStore};
 use providers::ProviderService;
 use tauri::{AppHandle, Emitter, Manager, State};
 use terminal::{
-    ensure_terminal, resize_terminal, terminate_terminal, write_input, TerminalRegistry,
+    create_terminal_session, ensure_terminal, resize_terminal, terminate_terminal, write_input,
+    TerminalRegistry,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -938,6 +939,16 @@ async fn start_terminal(
 }
 
 #[tauri::command]
+async fn create_terminal(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TerminalHandle, String> {
+    create_terminal_session(app, &state.terminals)
+        .await
+        .map_err(to_command_error)
+}
+
+#[tauri::command]
 async fn write_terminal_input(
     state: State<'_, AppState>,
     session_id: String,
@@ -1294,6 +1305,7 @@ pub fn run() {
             send_agent_message,
             cancel_stream,
             start_terminal,
+            create_terminal,
             write_terminal_input,
             kill_terminal,
             resize_terminal_command,

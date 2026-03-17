@@ -1,7 +1,7 @@
 # Grok Desktop
 <img width="2094" height="1140" alt="Screenshot 2026-03-08 at 11 58 17 AM" src="https://github.com/user-attachments/assets/88e3c94d-8acf-4736-b03b-8893e9facbd2" />
 
-Grok Desktop is a macOS Tauri app for xAI with chat, workspace-aware tools, browser preview, a local terminal, media generation, a first-pass media editor, and an in-app IDE surface.
+Grok Desktop is a macOS Tauri app for xAI with a multi-terminal grid (Tiles), chat, workspace-aware tools, browser preview, a local terminal with full ANSI color support, media generation, a first-pass media editor, and an in-app IDE surface.
 
 ## Current Scope
 
@@ -12,9 +12,10 @@ Grok Desktop is a macOS Tauri app for xAI with chat, workspace-aware tools, brow
 
 ## Features
 
+- `Tiles` page for opening a grid of independent terminal windows (1x2, 2x2, or 3x3 layouts) — each tile is a full PTY session with ANSI color support, perfect for running multiple Claude instances or any terminal workflow side-by-side
 - Chat with Grok models and streamed responses
 - Workspace indexing for prompt context
-- Embedded terminal and browser preview
+- Embedded terminal and browser preview with full ANSI color and truecolor support
 - `Imagine` page for image and video generation
 - `Voice & Audio` page for TTS and realtime voice
 - `Media Editor` page with timeline-style export flow
@@ -27,7 +28,7 @@ Grok Desktop is a macOS Tauri app for xAI with chat, workspace-aware tools, brow
 
 - It starts a localhost-only bridge inside the app.
 - It can expose that bridge through:
-  - `Hands Relay`, a relay service you control
+  - `Hands Relay`, a relay service **you deploy and control**
   - `Cloudflare tunnel`, as a fallback transport
 - It requires a one-time pairing code from the desktop UI before the phone gets an authenticated session.
 - It provides a mobile web interface for:
@@ -40,109 +41,50 @@ Grok Desktop is a macOS Tauri app for xAI with chat, workspace-aware tools, brow
 
 Current requirements and limits:
 
-- For `Hands Relay`, you need a running relay service and a configured relay URL.
+- For `Hands Relay`, you need to deploy your own relay service and configure its URL in the app.
 - For `Cloudflare tunnel`, `cloudflared` must either be on your `PATH` or configured in the `Hands` page executable field.
 - The mobile bridge is currently separate from the main desktop chat history.
 - The first relay pass is request/response oriented and does not yet include richer live job streaming or shell/task execution over the relay.
 
-## Hands Relay
+## Hands Relay Security
 
-This repository now includes a standalone relay service under [`hands-relay/`](hands-relay).
+> **Every message, prompt, and generated file you send through Hands passes through the relay server in plaintext.** Whoever operates the relay can see all of that data. For this reason:
+>
+> - **Always deploy your own relay.** Never paste someone else's relay URL into the app unless you fully trust them with all your Hands traffic.
+> - **The app ships with no default relay URL.** You must deploy one yourself before Hands will work.
+> - **The relay code is open source** and included in this repository under [`hands-relay/`](hands-relay) so you can audit exactly what it does.
 
-Run it locally:
+## Deploy Your Own Hands Relay
 
-```bash
-cd hands-relay
-npm install
-npm run start
-```
+Each user must deploy their own relay. The fastest path is Render (free tier works).
 
-Local development default:
+### Step 1 — Deploy to Render
 
-- Relay URL: `http://127.0.0.1:8787`
-- Mobile page pattern: `http://127.0.0.1:8787/m/:machineId`
-
-For real away-from-home access, deploy that relay on a public HTTPS host, then set the `Hands Relay URL` field inside the app to that origin.
-
-The repository now includes a Render Blueprint at [`render.yaml`](render.yaml) for deploying `hands-relay` as a public HTTPS service.
-
-## Deploy Hands Relay
-
-The fastest production path is Render.
-
-If you plan to share Grok Desktop with other users, each user should either:
-
-- deploy their own `Hands Relay` service, or
-- use a relay service you operate for them
-
-The app does not magically create a public HTTPS endpoint from a local machine by itself. Off-site `Hands` access requires a public relay origin.
-
-Before you deploy:
-
-1. Commit and push the latest repository state to GitHub.
-2. Make sure the repository root contains [`render.yaml`](render.yaml).
-3. Make sure the relay service files are present under [`hands-relay/`](hands-relay).
-
-Render setup:
-
-1. Sign in to Render.
-2. Click `New +`.
-3. Choose `Blueprint`.
-4. Connect the GitHub repository that contains this project.
-5. Render should detect [`render.yaml`](render.yaml).
-6. Review the `hands-relay` service that the Blueprint defines.
-7. Deploy it.
-8. After the service goes live, copy the Render HTTPS URL, for example:
+1. Fork or clone this repository to your own GitHub account.
+2. Sign in to [Render](https://render.com).
+3. Click `New +` and choose `Blueprint`.
+4. Connect the GitHub repository that contains your fork/clone.
+5. Render will detect [`render.yaml`](render.yaml) and show a `hands-relay` service.
+6. Deploy it.
+7. After the service goes live, copy your Render HTTPS URL, for example:
 
 ```text
-https://hands-relay.onrender.com
+https://your-hands-relay.onrender.com
 ```
 
-9. In Grok Desktop, open `Hands`.
-10. Set `Provider` to `Hands Relay`.
-11. Set `Hands Relay URL` to the Render HTTPS URL.
-12. Click `Start secure link`.
-13. Wait for the QR code and mobile URL to refresh.
+### Step 2 — Configure the App
 
-## Relay Setup For Other Users
+1. Open Grok Desktop and go to **Hands**.
+2. Set **Provider** to `Hands Relay`.
+3. Paste your Render HTTPS URL into **Your Relay URL**.
+4. Click **Save setup**, then **Start secure link**.
+5. Scan the QR code from your phone and enter the one-time pairing code.
 
-If someone else installs Grok Desktop and wants `Hands` remote access, they need to configure a public relay too.
+That's it. Your phone now connects to your desktop through your own relay.
 
-Per-user setup flow:
+### Local Development (Optional)
 
-1. Fork or clone this repository.
-2. Deploy `hands-relay` to Render or another public HTTPS host.
-3. Copy the deployed relay URL.
-4. In Grok Desktop, open `Hands`.
-5. Set `Provider` to `Hands Relay`.
-6. Paste the deployed relay URL into `Hands Relay URL`.
-7. Click `Start secure link`.
-8. Scan the QR code from the phone and finish pairing with the one-time code.
-
-If you operate a shared relay for multiple users:
-
-- they can all point `Hands Relay URL` at the same deployed relay origin
-- each desktop app generates its own machine identity and pairing flow
-- each phone still pairs against a specific machine session
-
-That means one public relay service can support multiple Grok Desktop users, but every user still has to configure the app to point at that relay.
-
-Update behavior:
-
-- changes to the mobile `Hands` web experience inside `hands-relay/` require a relay redeploy
-- changes to the desktop app itself require rebuilding or reinstalling Grok Desktop
-
-Optional production hardening:
-
-- Attach a custom domain in Render later if you want your own hostname.
-- Set `HANDS_PUBLIC_BASE_URL` in Render if you want to force the exact external origin.
-- Keep in mind free-tier services may sleep and take time to wake up.
-
-## Hands Startup Flow
-
-Local relay development flow:
-
-1. Start the relay:
+If you want to test the relay locally (phone and desktop on the same network):
 
 ```bash
 cd hands-relay
@@ -150,24 +92,22 @@ npm install
 npm run start
 ```
 
-2. Open Grok Desktop and go to `Hands`.
-3. Set `Provider` to `Hands Relay`.
-4. Set `Hands Relay URL` to `http://127.0.0.1:8787`.
-5. Click `Start secure link`.
-6. When the desktop connects, `Hands` will show a public/mobile URL and generate a QR code.
+Then set `Your Relay URL` to `http://127.0.0.1:8787` in the app. This only works on the same Wi-Fi — for real remote access you need a public HTTPS deployment.
 
-For real off-site phone access:
+### Optional Production Hardening
 
-1. Deploy `hands-relay` to a public HTTPS host.
-2. Set `Hands Relay URL` in the app to that deployed origin, for example `https://hands.yourdomain.com`.
-3. Start `Hands`.
-4. Scan the QR code from the desktop app and complete pairing with the one-time code.
+- Attach a custom domain in Render if you want your own hostname.
+- Set `HANDS_PUBLIC_BASE_URL` in Render environment variables to force the exact external origin.
+- Free-tier Render services may sleep after inactivity and take a few seconds to wake up.
 
 ## Hands Troubleshooting
 
+- `Hands relay URL is missing`:
+  - You need to deploy your own relay and paste the URL into the Hands settings. See the deploy steps above.
+
 - `IO error: Connection refused (os error 61)`:
-  - The app could not reach the configured `Hands Relay URL`.
-  - Start `hands-relay`, or point the app at the correct deployed relay origin.
+  - The app could not reach the configured relay URL.
+  - Make sure your relay is deployed and running, and the URL is correct.
 
 - `Tunnel unavailable. Install cloudflared or point Hands at the correct executable path.`:
   - This only applies when `Provider` is set to `Cloudflare tunnel`.
@@ -175,8 +115,7 @@ For real off-site phone access:
 
 - No QR code appears:
   - `Hands` only renders a QR code after it has a reachable public/mobile URL.
-  - For local relay development, that means the relay must be running and the desktop must connect successfully.
-  - For real remote use, the relay must be deployed on a public HTTPS host. A localhost relay URL will not work once you leave the network.
+  - Make sure your relay is deployed on a public HTTPS host and the app connected successfully.
 
 ## Install
 

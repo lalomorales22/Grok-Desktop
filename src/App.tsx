@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FitAddon } from "@xterm/addon-fit";
 import clsx from "clsx";
@@ -17,6 +18,7 @@ import {
   FolderOpen,
   Globe,
   ImagePlus,
+  LayoutGrid,
   MoveDown,
   MoveUp,
   MessageSquarePlus,
@@ -83,7 +85,7 @@ hljs.registerLanguage("html", hljsXml);
 hljs.registerLanguage("yaml", hljsYaml);
 hljs.registerLanguage("yml", hljsYaml);
 
-type AppPage = "chat" | "imagine" | "voice" | "editor" | "ide" | "hands";
+type AppPage = "tiles" | "chat" | "imagine" | "voice" | "editor" | "ide" | "hands";
 type RightPanelMode = "workspace" | "browser";
 type DragMode = "left" | "right" | "footer";
 
@@ -616,6 +618,12 @@ function App() {
   }, [initialize]);
 
   useEffect(() => {
+    const suppress = (event: MouseEvent) => event.preventDefault();
+    document.addEventListener("contextmenu", suppress);
+    return () => document.removeEventListener("contextmenu", suppress);
+  }, []);
+
+  useEffect(() => {
     if (!error) {
       return undefined;
     }
@@ -742,7 +750,7 @@ function GrokShell() {
 
   const clampedLeftWidth = clamp(leftWidth, 180, Math.max(180, Math.floor(viewport.width * 0.28)));
   const showHistoryRail = page === "chat";
-  const showShellRightSidebar = page !== "ide" && page !== "hands" && rightPanelVisible;
+  const showShellRightSidebar = page !== "tiles" && page !== "ide" && page !== "hands" && rightPanelVisible;
   const clampedRightWidth = showShellRightSidebar
     ? clamp(rightWidth, 280, Math.max(280, Math.floor(viewport.width * 0.42)))
     : 0;
@@ -775,7 +783,7 @@ function GrokShell() {
             gridTemplateColumns: showHistoryRail
               ? `${clampedLeftWidth}px 8px minmax(0,1fr) ${showShellRightSidebar ? 8 : 0}px ${clampedRightWidth}px`
               : `minmax(0,1fr) ${showShellRightSidebar ? 8 : 0}px ${clampedRightWidth}px`,
-            gridTemplateRows: terminalVisible ? `58px minmax(0,1fr) 8px ${clampedFooterHeight}px` : "58px minmax(0,1fr)",
+            gridTemplateRows: terminalVisible && page !== "tiles" ? `58px minmax(0,1fr) 8px ${clampedFooterHeight}px` : "58px minmax(0,1fr)",
           }}
         >
           <div className="col-[1/-1]">
@@ -876,7 +884,7 @@ function GrokShell() {
             <div />
           )}
 
-          {terminalVisible ? (
+          {terminalVisible && page !== "tiles" ? (
             <>
               <div className="col-[1/-1]">
                 <ResizeHandle
@@ -1018,6 +1026,9 @@ function TopBar({
         </NavTab>
         <NavTab pageId="ide" active={page === "ide"} onClick={() => onSelectPage("ide")}>
           IDE
+        </NavTab>
+        <NavTab pageId="tiles" active={page === "tiles"} onClick={() => onSelectPage("tiles")}>
+          TILES
         </NavTab>
         <NavTab pageId="hands" active={page === "hands"} onClick={() => onSelectPage("hands")}>
           HANDS
@@ -1367,7 +1378,9 @@ function CenterStage({
   onClearEditor: () => void;
 }) {
   let content: React.ReactNode;
-  if (page === "imagine") {
+  if (page === "tiles") {
+    content = <TilesPage />;
+  } else if (page === "imagine") {
     content = <ImaginePage onShowBrowser={onShowBrowser} />;
   } else if (page === "voice") {
     content = <VoiceAudioPage onShowBrowser={onShowBrowser} />;
@@ -2942,6 +2955,7 @@ function IdePage({ onShowBrowser }: { onShowBrowser: () => void }) {
   const [savingFile, setSavingFile] = useState(false);
   const [previewMode, setPreviewMode] = useState<"code" | "preview">("code");
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
+  const [ideRightMode, setIdeRightMode] = useState<"assistant" | "browser">("assistant");
   const [assistantModel, setAssistantModel] = useState(settings?.xaiModel ?? "grok-code-fast-1");
   const [assistantComposer, setAssistantComposer] = useState("");
   const [assistantConversationId, setAssistantConversationId] = useState<string>();
@@ -3642,99 +3656,134 @@ function IdePage({ onShowBrowser }: { onShowBrowser: () => void }) {
           />
 
           <aside className="flex min-h-0 flex-col overflow-hidden border-l border-white/6 bg-[rgba(10,11,13,0.97)]">
-            <div className="border-b border-white/6 px-3 py-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Assistant</p>
-                  <h3 className="mt-1 text-[13px] font-semibold text-stone-100">Grok IDE Copilot</h3>
-                  <p className="mt-1 text-[10px] leading-5 text-stone-500">
-                    Ask Grok about the open file, then apply its answer directly into the editor.
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-white/8 bg-white/5 p-2 text-stone-100">
-                  <Bot className="h-4 w-4" />
-                </div>
-              </div>
-              <select
-                value={assistantModel}
-                onChange={(event) => setAssistantModel(event.target.value)}
-                className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-emerald-300/35"
-              >
-                {CHAT_MODELS.map((modelId) => (
-                  <option key={modelId} value={modelId}>
-                    {modelId}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
-              {assistantMessages.length ? (
-                assistantMessages.map((message) => (
-                  <article
-                    key={message.id}
-                    className={clsx(
-                      "rounded-[18px] border px-3 py-2.5",
-                      message.role === "assistant"
-                        ? "border-white/8 bg-white/[0.03] text-stone-100"
-                        : "border-emerald-300/16 bg-emerald-300/8 text-emerald-50",
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[9px] uppercase tracking-[0.2em] text-stone-400">
-                        {message.role === "assistant" ? assistantModel : "You"}
-                      </p>
-                      <p className="text-[9px] text-stone-500">{message.status}</p>
-                    </div>
-                    <p className="mt-2 whitespace-pre-wrap text-[11px] leading-5">{message.content || "…"}</p>
-                    {message.role === "assistant" && message.content ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPreviewMode("code");
-                          setFileContent(extractAssistantCode(message.content));
-                        }}
-                        className="mt-3 inline-flex items-center gap-1 rounded-lg border border-amber-300/18 bg-amber-300/10 px-2 py-1 text-[10px] text-amber-50 transition hover:bg-amber-300/16"
-                      >
-                        <Code2 className="h-3 w-3" />
-                        Replace Open File
-                      </button>
-                    ) : null}
-                  </article>
-                ))
-              ) : (
-                <EmptyPanel
-                  eyebrow="Assistant"
-                  title="No IDE prompts yet."
-                  body="Select a file and ask Grok to explain, refactor, or rewrite it."
-                />
-              )}
-            </div>
-            <div className="border-t border-white/6 px-3 py-3">
-              <p className="mb-2 text-[10px] text-stone-500">
-                {activeItem ? `Context file: ${leafName(activeItem.path)}` : "Open a file to give Grok direct context."}
-              </p>
-              <textarea
-                value={assistantComposer}
-                onChange={(event) => setAssistantComposer(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendAssistantMessage();
-                  }
-                }}
-                placeholder="Ask Grok to change the current file…"
-                className="min-h-24 w-full resize-none rounded-[18px] border border-white/8 bg-black/30 px-3 py-3 text-[11px] leading-5 text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/35"
-              />
+            <div className="flex items-center gap-1 border-b border-white/6 px-3 py-2">
               <button
                 type="button"
-                onClick={() => void sendAssistantMessage()}
-                disabled={!assistantComposer.trim() || assistantSending}
-                className="mt-2 inline-flex w-full items-center justify-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+                onClick={() => setIdeRightMode("assistant")}
+                className={clsx(
+                  "inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-[10px] transition",
+                  ideRightMode === "assistant"
+                    ? "border-emerald-300/20 bg-emerald-300/12 text-emerald-50"
+                    : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+                )}
               >
-                <Send className="h-3 w-3" />
-                {assistantSending ? "Sending…" : "Send To Grok"}
+                <Bot className="h-3 w-3" />
+                Assistant
+              </button>
+              <button
+                type="button"
+                onClick={() => setIdeRightMode("browser")}
+                className={clsx(
+                  "inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-[10px] transition",
+                  ideRightMode === "browser"
+                    ? "border-sky-300/20 bg-sky-300/12 text-sky-50"
+                    : "border-white/8 bg-white/5 text-stone-300 hover:bg-white/10",
+                )}
+              >
+                <Globe className="h-3 w-3" />
+                Browser
               </button>
             </div>
+
+            {ideRightMode === "browser" ? (
+              <BrowserPanel />
+            ) : (
+              <>
+                <div className="border-b border-white/6 px-3 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.3em] text-[#84a09b]">Assistant</p>
+                      <h3 className="mt-1 text-[13px] font-semibold text-stone-100">Grok IDE Copilot</h3>
+                      <p className="mt-1 text-[10px] leading-5 text-stone-500">
+                        Ask Grok about the open file, then apply its answer directly into the editor.
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-white/5 p-2 text-stone-100">
+                      <Bot className="h-4 w-4" />
+                    </div>
+                  </div>
+                  <select
+                    value={assistantModel}
+                    onChange={(event) => setAssistantModel(event.target.value)}
+                    className="mt-3 w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none focus:border-emerald-300/35"
+                  >
+                    {CHAT_MODELS.map((modelId) => (
+                      <option key={modelId} value={modelId}>
+                        {modelId}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
+                  {assistantMessages.length ? (
+                    assistantMessages.map((message) => (
+                      <article
+                        key={message.id}
+                        className={clsx(
+                          "rounded-[18px] border px-3 py-2.5",
+                          message.role === "assistant"
+                            ? "border-white/8 bg-white/[0.03] text-stone-100"
+                            : "border-emerald-300/16 bg-emerald-300/8 text-emerald-50",
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[9px] uppercase tracking-[0.2em] text-stone-400">
+                            {message.role === "assistant" ? assistantModel : "You"}
+                          </p>
+                          <p className="text-[9px] text-stone-500">{message.status}</p>
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap text-[11px] leading-5">{message.content || "…"}</p>
+                        {message.role === "assistant" && message.content ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPreviewMode("code");
+                              setFileContent(extractAssistantCode(message.content));
+                            }}
+                            className="mt-3 inline-flex items-center gap-1 rounded-lg border border-amber-300/18 bg-amber-300/10 px-2 py-1 text-[10px] text-amber-50 transition hover:bg-amber-300/16"
+                          >
+                            <Code2 className="h-3 w-3" />
+                            Replace Open File
+                          </button>
+                        ) : null}
+                      </article>
+                    ))
+                  ) : (
+                    <EmptyPanel
+                      eyebrow="Assistant"
+                      title="No IDE prompts yet."
+                      body="Select a file and ask Grok to explain, refactor, or rewrite it."
+                    />
+                  )}
+                </div>
+                <div className="border-t border-white/6 px-3 py-3">
+                  <p className="mb-2 text-[10px] text-stone-500">
+                    {activeItem ? `Context file: ${leafName(activeItem.path)}` : "Open a file to give Grok direct context."}
+                  </p>
+                  <textarea
+                    value={assistantComposer}
+                    onChange={(event) => setAssistantComposer(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void sendAssistantMessage();
+                      }
+                    }}
+                    placeholder="Ask Grok to change the current file…"
+                    className="min-h-24 w-full resize-none rounded-[18px] border border-white/8 bg-black/30 px-3 py-3 text-[11px] leading-5 text-stone-100 outline-none placeholder:text-stone-600 focus:border-emerald-300/35"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void sendAssistantMessage()}
+                    disabled={!assistantComposer.trim() || assistantSending}
+                    className="mt-2 inline-flex w-full items-center justify-center gap-1 rounded-xl border border-emerald-300/20 bg-emerald-300/12 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/20 disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/5 disabled:text-stone-500"
+                  >
+                    <Send className="h-3 w-3" />
+                    {assistantSending ? "Sending…" : "Send To Grok"}
+                  </button>
+                </div>
+              </>
+            )}
           </aside>
         </div>
       ) : (
@@ -3881,7 +3930,7 @@ function HandsPage() {
   const stopHandsService = useAppStore((state) => state.stopHandsService);
   const [provider, setProvider] = useState(settings?.handsTunnelProvider ?? "relay");
   const [tunnelExecutable, setTunnelExecutable] = useState(settings?.handsTunnelExecutable ?? "");
-  const [relayUrl, setRelayUrl] = useState(settings?.handsRelayUrl ?? "http://127.0.0.1:8787");
+  const [relayUrl, setRelayUrl] = useState(settings?.handsRelayUrl ?? "");
   const [savingSetup, setSavingSetup] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(360);
   const [sidebarDragState, setSidebarDragState] = useState<{ startX: number; startValue: number } | null>(null);
@@ -3891,7 +3940,7 @@ function HandsPage() {
   useEffect(() => {
     setProvider(settings?.handsTunnelProvider ?? "relay");
     setTunnelExecutable(settings?.handsTunnelExecutable ?? "");
-    setRelayUrl(settings?.handsRelayUrl ?? "http://127.0.0.1:8787");
+    setRelayUrl(settings?.handsRelayUrl ?? "");
   }, [settings?.handsTunnelExecutable, settings?.handsTunnelProvider, settings?.handsRelayUrl]);
 
   useEffect(() => {
@@ -3927,7 +3976,7 @@ function HandsPage() {
   const localUrl = handsStatus?.localUrl ?? "";
   const pairingCode = handsStatus?.pairingCode ?? "";
   const executableChanged = tunnelExecutable !== (settings?.handsTunnelExecutable ?? "");
-  const relayChanged = relayUrl !== (settings?.handsRelayUrl ?? "http://127.0.0.1:8787");
+  const relayChanged = relayUrl !== (settings?.handsRelayUrl ?? "");
   const providerChanged = provider !== (settings?.handsTunnelProvider ?? "relay");
   const activityItems = handsStatus?.activity ?? [];
   const messageItems = activityItems.filter((item) => ["message", "assistant", "connection", "system"].includes(item.kind));
@@ -4321,13 +4370,18 @@ function HandsPage() {
                   </select>
                 </label>
                 <label className="mt-4 block">
-                  <span className="mb-2 block text-[10px] uppercase tracking-[0.28em] text-stone-500">Hands Relay URL</span>
+                  <span className="mb-2 block text-[10px] uppercase tracking-[0.28em] text-stone-500">Your Relay URL</span>
                   <input
                     value={relayUrl}
                     onChange={(event) => setRelayUrl(event.target.value)}
-                    placeholder="https://hands.yourdomain.com"
+                    placeholder="https://your-hands-relay.onrender.com"
                     className="w-full rounded-2xl border border-white/8 bg-white/[0.04] px-3 py-2 font-['IBM_Plex_Mono'] text-[11px] text-stone-100 outline-none transition focus:border-emerald-300/30"
                   />
+                  <span className="mt-1.5 block text-[10px] leading-[1.5] text-amber-300/70">
+                    You must deploy your own relay. All Hands traffic (messages, generated files) passes through this server.
+                    Never use someone else's relay URL — they could see your data. Deploy the hands-relay folder to Render
+                    (free tier) or any HTTPS host you control. See the README for setup steps.
+                  </span>
                 </label>
                 <label className="block">
                   <span className="mb-2 block text-[10px] uppercase tracking-[0.28em] text-stone-500">Tunnel Executable</span>
@@ -4352,7 +4406,7 @@ function HandsPage() {
                     onClick={() => {
                       setProvider(settings?.handsTunnelProvider ?? "relay");
                       setTunnelExecutable(settings?.handsTunnelExecutable ?? "");
-                      setRelayUrl(settings?.handsRelayUrl ?? "http://127.0.0.1:8787");
+                      setRelayUrl(settings?.handsRelayUrl ?? "");
                     }}
                     disabled={savingSetup || (!executableChanged && !relayChanged && !providerChanged)}
                     className="rounded-2xl border border-white/8 bg-transparent px-4 py-2 text-[11px] text-stone-400 transition hover:border-white/14 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-45"
@@ -5346,6 +5400,185 @@ function BrowserPanel() {
           <iframe title="Grok Desktop browser" src={browserUrl} className="h-full w-full border-0 bg-[#050607]" />
         )}
       </div>
+    </div>
+  );
+}
+
+type TileLayout = 2 | 4 | 9;
+
+function TilesPage() {
+  const [layout, setLayout] = useState<TileLayout>(4);
+  const [sessions, setSessions] = useState<string[]>([]);
+  const prevLayoutRef = useRef<TileLayout>(layout);
+
+  useEffect(() => {
+    let cancelled = false;
+    const spawnSessions = async () => {
+      const handles: string[] = [];
+      for (let i = 0; i < layout; i++) {
+        if (cancelled) break;
+        const handle = await api.createTerminal();
+        handles.push(handle.sessionId);
+      }
+      if (!cancelled) {
+        setSessions(handles);
+      }
+    };
+
+    // Kill old sessions when layout changes
+    if (prevLayoutRef.current !== layout || sessions.length === 0) {
+      prevLayoutRef.current = layout;
+      // Kill existing sessions
+      for (const sid of sessions) {
+        void api.killTerminal(sid);
+      }
+      setSessions([]);
+      void spawnSessions();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout]);
+
+  // Cleanup all sessions on unmount
+  useEffect(() => {
+    return () => {
+      setSessions((current) => {
+        for (const sid of current) {
+          void api.killTerminal(sid);
+        }
+        return [];
+      });
+    };
+  }, []);
+
+  const gridClass =
+    layout === 2
+      ? "grid-cols-2 grid-rows-1"
+      : layout === 4
+        ? "grid-cols-2 grid-rows-2"
+        : "grid-cols-3 grid-rows-3";
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center gap-2 px-4 py-2">
+        <LayoutGrid className="h-4 w-4 text-emerald-300/70" />
+        <span className="text-[11px] font-semibold tracking-wide text-stone-300">Terminal Tiles</span>
+        <div className="ml-auto flex items-center gap-1">
+          {([2, 4, 9] as TileLayout[]).map((n) => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setLayout(n)}
+              className={clsx(
+                "rounded-lg px-2.5 py-1 text-[10px] font-semibold tracking-wide transition",
+                layout === n
+                  ? "bg-emerald-400/15 text-emerald-200 border border-emerald-400/20"
+                  : "text-stone-400 hover:text-stone-200 hover:bg-white/5 border border-transparent",
+              )}
+            >
+              {n === 2 ? "1×2" : n === 4 ? "2×2" : "3×3"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={clsx("grid flex-1 min-h-0 gap-1 p-1", gridClass)}>
+        {sessions.map((sessionId) => (
+          <TileTerminal key={sessionId} sessionId={sessionId} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TileTerminal({ sessionId }: { sessionId: string }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<XTerm | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const outputCursorRef = useRef(0);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return undefined;
+
+    const terminal = new XTerm({
+      fontFamily: "IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: 11,
+      cursorBlink: true,
+      convertEol: false,
+      theme: {
+        background: "#070809",
+        foreground: "#d6d3d1",
+        cursor: "#a7f3d0",
+        black: "#0f1115",
+        brightBlack: "#4b5563",
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(host);
+    fitAddon.fit();
+    terminal.focus();
+
+    xtermRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+
+    const dataSubscription = terminal.onData((value) => {
+      void api.writeTerminalInput(sessionId, value);
+    });
+
+    const resize = () => {
+      fitAddon.fit();
+      if (terminal.cols > 0 && terminal.rows > 0) {
+        void api.resizeTerminal(sessionId, terminal.cols, terminal.rows);
+      }
+    };
+
+    resize();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => resize()) : null;
+    observer?.observe(host);
+
+    let unlistenFn: (() => void) | null = null;
+    const setupListener = async () => {
+      const unlisten = await listen<{
+        sessionId: string;
+        kind: string;
+        chunk?: string | null;
+        stream?: string | null;
+        exitCode?: number | null;
+      }>("terminal://event", ({ payload }) => {
+        if (payload.sessionId !== sessionId) return;
+        const term = xtermRef.current;
+        if (!term) return;
+
+        if (payload.kind === "output") {
+          const chunk = payload.chunk ?? "";
+          term.write(chunk);
+          outputCursorRef.current += chunk.length;
+        } else if (payload.kind === "exit") {
+          term.write(`\r\n[terminal exited${payload.exitCode != null ? `: ${payload.exitCode}` : ""}]\r\n`);
+        }
+      });
+      unlistenFn = unlisten;
+    };
+    void setupListener();
+
+    return () => {
+      observer?.disconnect();
+      dataSubscription.dispose();
+      terminal.dispose();
+      xtermRef.current = null;
+      fitAddonRef.current = null;
+      outputCursorRef.current = 0;
+      unlistenFn?.();
+    };
+  }, [sessionId]);
+
+  return (
+    <div className="min-h-0 min-w-0 overflow-hidden rounded-xl border border-white/8 bg-[#070809]">
+      <div ref={hostRef} className="h-full w-full overflow-hidden p-1" />
     </div>
   );
 }

@@ -117,6 +117,7 @@ export const api = {
   sendAgentMessage: (input: AgentChatRequest) =>
     invoke<StreamHandle>("send_agent_message", { input }),
   startTerminal: () => invoke<TerminalHandle>("start_terminal"),
+  createTerminal: () => invoke<TerminalHandle>("create_terminal"),
   writeTerminalInput: (sessionId: string, input: string) =>
     invoke<void>("write_terminal_input", { sessionId, input }),
   killTerminal: (sessionId: string) =>

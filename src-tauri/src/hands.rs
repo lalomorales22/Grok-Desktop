@@ -264,16 +264,8 @@ impl HandsService {
             patch.hands_relay_desktop_token = Some(uuid::Uuid::new_v4().to_string());
             changed = true;
         }
-        if settings
-            .hands_relay_url
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .is_empty()
-        {
-            patch.hands_relay_url = Some("http://127.0.0.1:8787".into());
-            changed = true;
-        }
+        // Relay URL is intentionally left empty by default.
+        // The user must deploy their own relay and configure the URL in Settings.
 
         if changed {
             return self.db.update_settings(patch);

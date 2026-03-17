@@ -464,6 +464,7 @@ async fn grep(pattern: &str, root: &PathBuf, include: Option<&str>) -> AppResult
 // Tool implementations — shell
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 

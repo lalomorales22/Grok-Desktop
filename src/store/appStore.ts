@@ -152,7 +152,7 @@ const fallbackSettings: Settings = {
   xaiVoiceName: "eve",
   handsTunnelProvider: "relay",
   handsTunnelExecutable: "",
-  handsRelayUrl: "http://127.0.0.1:8787",
+  handsRelayUrl: "",
   handsRelayMachineId: "",
   handsRelayDesktopToken: "",
 };

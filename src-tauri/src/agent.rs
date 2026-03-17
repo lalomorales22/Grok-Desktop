@@ -18,6 +18,7 @@ pub struct AgentConfig {
     /// Hard ceiling on the number of LLM round-trips (tool-call iterations).
     pub max_iterations: usize,
     /// Workspace root directories available to tools.
+    #[allow(dead_code)]
     pub workspace_roots: Vec<String>,
 }
 
@@ -91,6 +92,7 @@ pub struct ToolCallFunction {
 #[derive(Debug, Clone)]
 pub struct AgentLoopResult {
     pub final_text: String,
+    #[allow(dead_code)]
     pub iterations: usize,
     pub tool_calls_made: Vec<ToolCallRecord>,
     pub usage: TokenUsage,
@@ -289,7 +291,7 @@ pub async fn run_agent(
             .next()
             .ok_or_else(|| AppError::message("xAI returned no choices"))?;
 
-        let finish_reason = choice.finish_reason.as_deref().unwrap_or("stop");
+        let _finish_reason = choice.finish_reason.as_deref().unwrap_or("stop");
         let assistant_content = choice.message.content.clone();
         let assistant_tool_calls = choice.message.tool_calls.clone();
 

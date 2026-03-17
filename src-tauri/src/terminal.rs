@@ -53,9 +53,69 @@ pub async fn ensure_terminal(
     command.env("HOME", home_dir.to_string_lossy().to_string());
     command.env("PATH", shell_path());
     command.env("TERM", "xterm-256color");
-    command.env("CLICOLOR", "0");
-    command.env("CLICOLOR_FORCE", "0");
-    command.env("NO_COLOR", "1");
+    command.env("CLICOLOR", "1");
+    command.env("CLICOLOR_FORCE", "1");
+    command.env("COLORTERM", "truecolor");
+
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| AppError::message(error.to_string()))?;
+    drop(pair.slave);
+
+    let master = pair.master;
+    let reader = master
+        .try_clone_reader()
+        .map_err(|error| AppError::message(error.to_string()))?;
+    let writer = master
+        .take_writer()
+        .map_err(|error| AppError::message(error.to_string()))?;
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let session = Arc::new(TerminalSession {
+        master: Mutex::new(master),
+        writer: Mutex::new(writer),
+        child: Mutex::new(child),
+    });
+
+    registry
+        .lock()
+        .map_err(|_| AppError::message("terminal registry lock poisoned"))?
+        .insert(session_id.clone(), Arc::clone(&session));
+
+    spawn_reader(app.clone(), session_id.clone(), reader);
+    spawn_waiter(app, session_id.clone(), Arc::clone(&session));
+
+    Ok(TerminalHandle { session_id })
+}
+
+/// Always creates a new terminal session (used by Tiles page for multiple terminals).
+pub async fn create_terminal_session(
+    app: AppHandle,
+    registry: &TerminalRegistry,
+) -> AppResult<TerminalHandle> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 30,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| AppError::message(error.to_string()))?;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let home_dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
+    let mut command = CommandBuilder::new(shell);
+    command.arg("-l");
+    command.arg("-i");
+    command.cwd(&home_dir);
+    command.env("HOME", home_dir.to_string_lossy().to_string());
+    command.env("PATH", shell_path());
+    command.env("TERM", "xterm-256color");
+    command.env("CLICOLOR", "1");
+    command.env("CLICOLOR_FORCE", "1");
+    command.env("COLORTERM", "truecolor");
 
     let child = pair
         .slave
