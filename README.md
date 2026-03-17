@@ -194,12 +194,19 @@ That's it. After the build finishes, launch **Grok Desktop** from Applications o
 
 ### From a Release DMG
 
-1. Download the latest `.dmg` from the repository's `Releases` page.
-2. Open the DMG and move `Grok Desktop.app` into `Applications`.
-3. Launch the app.
-4. Open `Settings` inside the app and paste your xAI API key.
+1. Download the latest `.dmg` from the repository's [Releases](https://github.com/lalomorales22/Grok-Desktop/releases) page.
+2. Open the DMG and drag `Grok Desktop.app` into `Applications`.
+3. **Important — the app is not code-signed yet.** macOS will block it on first launch. To open it:
+   - Open **Terminal** and run:
+     ```bash
+     xattr -cr "/Applications/Grok Desktop.app"
+     ```
+   - Then **Right-click** (or Control-click) `Grok Desktop` in Applications and choose **Open**.
+   - A dialog will warn that the app is from an unidentified developer. Click **Open**.
+   - After this one-time step, the app opens normally with a regular double-click.
+4. Open **Settings** inside the app and paste your xAI API key.
 
-If macOS blocks the first launch because the app is unsigned, open it with `Right Click -> Open`.
+> **Why is this needed?** macOS Gatekeeper quarantines apps that are not signed with an Apple Developer certificate. The `xattr -cr` command removes that quarantine flag. This is standard for any open-source app distributed outside the Mac App Store without code signing.
 
 ## Build From Source (Manual)
 
