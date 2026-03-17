@@ -5409,50 +5409,36 @@ type TileLayout = 2 | 4 | 9;
 function TilesPage() {
   const [layout, setLayout] = useState<TileLayout>(4);
   const [sessions, setSessions] = useState<string[]>([]);
-  const prevLayoutRef = useRef<TileLayout>(layout);
 
   useEffect(() => {
     let cancelled = false;
+    const spawned: string[] = [];
+
     const spawnSessions = async () => {
-      const handles: string[] = [];
       for (let i = 0; i < layout; i++) {
         if (cancelled) break;
         const handle = await api.createTerminal();
-        handles.push(handle.sessionId);
+        if (cancelled) {
+          void api.killTerminal(handle.sessionId);
+          break;
+        }
+        spawned.push(handle.sessionId);
       }
       if (!cancelled) {
-        setSessions(handles);
+        setSessions(spawned);
       }
     };
 
-    // Kill old sessions when layout changes
-    if (prevLayoutRef.current !== layout || sessions.length === 0) {
-      prevLayoutRef.current = layout;
-      // Kill existing sessions
-      for (const sid of sessions) {
-        void api.killTerminal(sid);
-      }
-      setSessions([]);
-      void spawnSessions();
-    }
+    void spawnSessions();
 
     return () => {
       cancelled = true;
+      for (const sid of spawned) {
+        void api.killTerminal(sid);
+      }
+      setSessions([]);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout]);
-
-  // Cleanup all sessions on unmount
-  useEffect(() => {
-    return () => {
-      setSessions((current) => {
-        for (const sid of current) {
-          void api.killTerminal(sid);
-        }
-        return [];
-      });
-    };
-  }, []);
 
   const gridClass =
     layout === 2
