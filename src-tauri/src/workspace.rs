@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 use crate::error::{AppError, AppResult};
 use crate::types::{WorkspaceItem, WorkspaceScanSummary};
 
-const MAX_FILES: usize = 200;
+const MAX_FILES: usize = 2000;
 const MAX_FILE_BYTES: u64 = 1_000_000;
 const CHUNK_BYTES: usize = 1800;
 
@@ -238,7 +238,31 @@ fn is_supported_text_file(path: &Path) -> bool {
 fn is_ignored(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
-        .map(|name| matches!(name, ".git" | "node_modules" | "target" | ".next" | "dist"))
+        .map(|name| {
+            matches!(
+                name,
+                ".git"
+                    | "node_modules"
+                    | "target"
+                    | ".next"
+                    | "dist"
+                    | "__pycache__"
+                    | ".venv"
+                    | "venv"
+                    | ".env"
+                    | "env"
+                    | ".tox"
+                    | ".eggs"
+                    | ".mypy_cache"
+                    | ".pytest_cache"
+                    | ".ruff_cache"
+                    | "build"
+                    | ".build"
+                    | ".DS_Store"
+                    | ".idea"
+                    | ".vscode"
+            )
+        })
         .unwrap_or(false)
 }
 

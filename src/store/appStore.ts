@@ -205,6 +205,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   initialize: async () => {
     try {
       if (!get().listenersReady) {
+        set({ listenersReady: true });
         await events.onStream((event: StreamEvent) => {
           set((state) => {
             const detail = state.activeConversation;
@@ -307,7 +308,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
         await events.onError((event) => set({ error: event.message }));
         await events.onHands((handsStatus) => set({ handsStatus, handsBusy: false }));
-        set({ listenersReady: true });
       }
 
       const [

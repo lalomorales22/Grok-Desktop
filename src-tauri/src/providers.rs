@@ -314,11 +314,16 @@ impl ProviderService {
                 "bit_rate": 128000,
             })
         };
+        let model_id = request
+            .model_id
+            .as_deref()
+            .unwrap_or("xai-tts");
         let response = self
             .client
             .post(XAI_TTS_ENDPOINT)
             .bearer_auth(api_key)
             .json(&serde_json::json!({
+                "model": model_id,
                 "text": request.input,
                 "voice_id": voice_id,
                 "output_format": output_format,
@@ -394,11 +399,17 @@ impl ProviderService {
             .and_then(Value::as_str)
             .map(ToString::to_string);
 
+        let model_id = request
+            .model_id
+            .as_deref()
+            .unwrap_or("grok-realtime");
+        let websocket_url = format!("{}?model={}", XAI_REALTIME_WEBSOCKET_URL, model_id);
+
         Ok(RealtimeSession {
             client_secret,
             expires_at,
-            websocket_url: XAI_REALTIME_WEBSOCKET_URL.into(),
-            model_id: request.model_id.clone(),
+            websocket_url,
+            model_id: Some(model_id.to_string()),
             voice: request.voice.clone(),
         })
     }

@@ -40,6 +40,21 @@ textarea {
   font: inherit;
 }
 
+/* Native window drag region for custom titlebar on macOS */
+.grok-titlebar {
+  -webkit-app-region: drag;
+}
+
+.grok-titlebar button,
+.grok-titlebar input,
+.grok-titlebar select,
+.grok-titlebar textarea,
+.grok-titlebar a,
+.grok-titlebar nav,
+.grok-titlebar [data-no-drag="true"] {
+  -webkit-app-region: no-drag;
+}
+
 * {
   box-sizing: border-box;
 }

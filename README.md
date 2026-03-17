@@ -64,7 +64,7 @@ Local development default:
 
 For real away-from-home access, deploy that relay on a public HTTPS host, then set the `Hands Relay URL` field inside the app to that origin.
 
-The repository now includes a Render Blueprint at [`render.yaml`](/Users/megabrain2/Software/Rust-Apps/Grok-Desktop/render.yaml) for deploying `hands-relay` as a public HTTPS service.
+The repository now includes a Render Blueprint at [`render.yaml`](render.yaml) for deploying `hands-relay` as a public HTTPS service.
 
 ## Deploy Hands Relay
 
@@ -80,8 +80,8 @@ The app does not magically create a public HTTPS endpoint from a local machine b
 Before you deploy:
 
 1. Commit and push the latest repository state to GitHub.
-2. Make sure the repository root contains [`render.yaml`](/Users/megabrain2/Software/Rust-Apps/Grok-Desktop/render.yaml).
-3. Make sure the relay service files are present under [`hands-relay/`](/Users/megabrain2/Software/Rust-Apps/Grok-Desktop/hands-relay).
+2. Make sure the repository root contains [`render.yaml`](render.yaml).
+3. Make sure the relay service files are present under [`hands-relay/`](hands-relay).
 
 Render setup:
 
@@ -89,7 +89,7 @@ Render setup:
 2. Click `New +`.
 3. Choose `Blueprint`.
 4. Connect the GitHub repository that contains this project.
-5. Render should detect [`render.yaml`](/Users/megabrain2/Software/Rust-Apps/Grok-Desktop/render.yaml).
+5. Render should detect [`render.yaml`](render.yaml).
 6. Review the `hands-relay` service that the Blueprint defines.
 7. Deploy it.
 8. After the service goes live, copy the Render HTTPS URL, for example:
@@ -180,7 +180,19 @@ For real off-site phone access:
 
 ## Install
 
-The easiest way to use the app is the packaged macOS DMG from the repository's GitHub Releases page.
+### One-Line Install (Build From Source)
+
+Clone the repo and run the install script. It checks for prerequisites (Xcode CLI Tools, Homebrew, Node.js 20+, Rust, ffmpeg), installs anything missing, builds the app, and copies it into `/Applications`:
+
+```bash
+git clone https://github.com/megabrain2/Grok-Desktop.git
+cd Grok-Desktop
+./install.sh
+```
+
+That's it. After the build finishes, launch **Grok Desktop** from Applications or Spotlight, open **Settings**, and paste your xAI API key.
+
+### From a Release DMG
 
 1. Download the latest `.dmg` from the repository's `Releases` page.
 2. Open the DMG and move `Grok Desktop.app` into `Applications`.
@@ -189,7 +201,7 @@ The easiest way to use the app is the packaged macOS DMG from the repository's G
 
 If macOS blocks the first launch because the app is unsigned, open it with `Right Click -> Open`.
 
-## Build From Source
+## Build From Source (Manual)
 
 Prerequisites:
 

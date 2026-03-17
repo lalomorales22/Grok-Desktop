@@ -28,13 +28,15 @@ import {
   Send,
   Settings2,
   Square,
+  SquareTerminal,
   Trash2,
   Video,
   Volume2,
   WandSparkles,
   Wifi,
 } from "lucide-react";
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Terminal as XTerm } from "xterm";
@@ -491,7 +493,11 @@ function createEditorClip(asset: MediaAsset): EditorClip {
 }
 
 function parseSecondsInput(value: string, fallback?: number) {
-  const parsed = Number(value.trim());
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  const parsed = Number(trimmed);
   if (!Number.isFinite(parsed) || parsed < 0) {
     return fallback;
   }
@@ -915,7 +921,7 @@ function TopBar({
   return (
     <div
       onPointerDown={handleTopBarPointerDown}
-      className="flex select-none items-center gap-3 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,11,13,0.98),rgba(8,9,11,0.94))] px-3 py-2"
+      className="grok-titlebar flex select-none items-center gap-3 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,11,13,0.98),rgba(8,9,11,0.94))] px-3 py-2"
     >
       <div className="flex items-center gap-2" data-no-drag="true">
         <button
@@ -1954,6 +1960,17 @@ function MediaAssetCard({ asset, onShowBrowser }: { asset: MediaAsset; onShowBro
   const deleteMediaAsset = useAppStore((state) => state.deleteMediaAsset);
   const [src, setSrc] = useState<string>();
   const [titleDraft, setTitleDraft] = useState(asset.prompt);
+  const [hovered, setHovered] = useState(false);
+  const [cardRect, setCardRect] = useState<DOMRect | null>(null);
+  const articleRef = useRef<HTMLElement>(null);
+
+  const handleMouseEnter = useCallback(() => {
+    if (articleRef.current) {
+      setCardRect(articleRef.current.getBoundingClientRect());
+      setHovered(true);
+    }
+  }, []);
+  const handleMouseLeave = useCallback(() => setHovered(false), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1993,7 +2010,12 @@ function MediaAssetCard({ asset, onShowBrowser }: { asset: MediaAsset; onShowBro
   };
 
   return (
-    <article className="group relative aspect-square overflow-visible">
+    <article
+      ref={articleRef}
+      className="group relative aspect-square overflow-visible"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
       <div className="flex h-full flex-col overflow-hidden rounded-[20px] border border-white/8 bg-[linear-gradient(180deg,rgba(11,13,15,0.98),rgba(8,9,11,0.96))] shadow-[0_14px_34px_rgba(0,0,0,0.22)] transition duration-200 group-hover:border-white/12 group-hover:shadow-[0_18px_42px_rgba(0,0,0,0.3)]">
         <div className="relative flex-1 overflow-hidden bg-black">
           {asset.kind === "audio" ? (
@@ -2026,126 +2048,140 @@ function MediaAssetCard({ asset, onShowBrowser }: { asset: MediaAsset; onShowBro
         </div>
       </div>
 
-      <div className="pointer-events-none absolute left-1/2 top-1/2 z-20 w-[min(320px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 opacity-0 transition duration-200 ease-out md:scale-[0.94] md:group-hover:pointer-events-auto md:group-hover:scale-100 md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:scale-100 md:group-focus-within:opacity-100">
-        <div className="flex flex-col overflow-hidden rounded-[24px] border border-white/10 bg-[#0b0d0f] p-2 shadow-[0_24px_64px_rgba(0,0,0,0.45)]">
-          <div className="overflow-hidden rounded-[18px] border border-white/8 bg-black">
-            <div className="aspect-[4/3] bg-black">
-              {asset.kind === "audio" ? (
-                <div className="flex h-full flex-col items-center justify-center gap-4 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),rgba(3,7,18,0.96)_62%)] p-4 text-center">
-                  <div className="flex h-14 w-14 items-center justify-center rounded-full border border-emerald-300/20 bg-emerald-300/10 text-emerald-100">
-                    <AudioLines className="h-6 w-6" />
+      {hovered && cardRect
+        ? createPortal(
+            <div
+              className="pointer-events-auto fixed z-[9999] w-[min(320px,calc(100vw-32px))]"
+              style={{
+                left: cardRect.left + cardRect.width / 2,
+                top: cardRect.top + cardRect.height / 2,
+                transform: "translate(-50%, -50%)",
+              }}
+              onMouseEnter={handleMouseEnter}
+              onMouseLeave={handleMouseLeave}
+            >
+              <div className="flex flex-col overflow-hidden rounded-[24px] border border-white/10 bg-[#0b0d0f] p-2 shadow-[0_24px_64px_rgba(0,0,0,0.45)]">
+                <div className="overflow-hidden rounded-[18px] border border-white/8 bg-black">
+                  <div className="aspect-[4/3] bg-black">
+                    {asset.kind === "audio" ? (
+                      <div className="flex h-full flex-col items-center justify-center gap-4 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),rgba(3,7,18,0.96)_62%)] p-4 text-center">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-full border border-emerald-300/20 bg-emerald-300/10 text-emerald-100">
+                          <AudioLines className="h-6 w-6" />
+                        </div>
+                        {src ? <audio src={src} controls className="w-full" /> : <p className="text-[10px] text-stone-500">Loading audio…</p>}
+                      </div>
+                    ) : !src ? (
+                      <div className="flex h-full items-center justify-center text-[11px] text-stone-500">Loading preview…</div>
+                    ) : asset.kind === "image" ? (
+                      <img src={src} alt={asset.prompt} className="h-full w-full object-cover" />
+                    ) : (
+                      <video src={src} controls className="h-full w-full object-cover" />
+                    )}
                   </div>
-                  {src ? <audio src={src} controls className="w-full" /> : <p className="text-[10px] text-stone-500">Loading audio…</p>}
                 </div>
-              ) : !src ? (
-                <div className="flex h-full items-center justify-center text-[11px] text-stone-500">Loading preview…</div>
-              ) : asset.kind === "image" ? (
-                <img src={src} alt={asset.prompt} className="h-full w-full object-cover" />
-              ) : (
-                <video src={src} controls className="h-full w-full object-cover" />
-              )}
-            </div>
-          </div>
 
-          <div className="space-y-2.5 px-1 pb-1 pt-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <p className="rounded-full border border-white/8 bg-white/5 px-2 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-400">
-                {asset.kind}
-              </p>
-              <p className="font-['IBM_Plex_Mono'] text-[9px] text-stone-500">{asset.modelId}</p>
-            </div>
+                <div className="space-y-2.5 px-1 pb-1 pt-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="rounded-full border border-white/8 bg-white/5 px-2 py-1 font-['IBM_Plex_Mono'] text-[9px] uppercase tracking-[0.18em] text-stone-400">
+                      {asset.kind}
+                    </p>
+                    <p className="font-['IBM_Plex_Mono'] text-[9px] text-stone-500">{asset.modelId}</p>
+                  </div>
 
-            {asset.kind === "audio" ? (
-              <div className="grid gap-2">
-                <input
-                  value={titleDraft}
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  placeholder="Clip name"
-                  className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-[11px] text-stone-100 outline-none focus:border-emerald-300/35"
-                />
-                <button
-                  type="button"
-                  onClick={() => void renameMediaAsset(asset.id, titleDraft)}
-                  className="inline-flex items-center justify-center gap-1 rounded-xl border border-emerald-300/18 bg-emerald-300/10 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/16"
-                >
-                  <Save className="h-3 w-3" />
-                  Save Name
-                </button>
+                  {asset.kind === "audio" ? (
+                    <div className="grid gap-2">
+                      <input
+                        value={titleDraft}
+                        onChange={(event) => setTitleDraft(event.target.value)}
+                        placeholder="Clip name"
+                        className="w-full rounded-xl border border-white/8 bg-black/30 px-3 py-2 text-[11px] text-stone-100 outline-none focus:border-emerald-300/35"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void renameMediaAsset(asset.id, titleDraft)}
+                        className="inline-flex items-center justify-center gap-1 rounded-xl border border-emerald-300/18 bg-emerald-300/10 px-3 py-2 text-[10px] text-emerald-50 transition hover:bg-emerald-300/16"
+                      >
+                        <Save className="h-3 w-3" />
+                        Save Name
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="line-clamp-2 text-[10px] leading-5 text-stone-200">{asset.prompt}</p>
+                  )}
+
+                  <label className="block space-y-1.5 text-[10px] text-stone-400">
+                    <span className="uppercase tracking-[0.2em]">Category</span>
+                    <select
+                      value={asset.categoryId ?? ""}
+                      onChange={(event) => void moveMediaAssetToCategory(asset.id, event.target.value || undefined)}
+                      className="w-full rounded-xl border border-white/8 bg-black/35 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-sky-300/35"
+                    >
+                      <option value="">Unsorted</option>
+                      {mediaCategories.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (src) {
+                          chrome?.openBrowserPreview(buildAssetPreviewDocument(asset, src));
+                          onShowBrowser();
+                        }
+                      }}
+                      className="inline-flex items-center justify-center gap-1 rounded-lg border border-sky-300/18 bg-sky-300/10 px-2 py-1.5 text-[10px] text-sky-100 transition hover:bg-sky-300/16"
+                    >
+                      <Eye className="h-3 w-3" />
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chrome?.openEditorAsset(asset)}
+                      className="inline-flex items-center justify-center gap-1 rounded-lg border border-amber-300/18 bg-amber-300/10 px-2 py-1.5 text-[10px] text-amber-50 transition hover:bg-amber-300/16"
+                    >
+                      <Video className="h-3 w-3" />
+                      Editor
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownload}
+                      className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-white/10"
+                    >
+                      <Download className="h-3 w-3" />
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopy()}
+                      className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-white/10"
+                    >
+                      <Copy className="h-3 w-3" />
+                      Path
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm(`Delete this ${asset.kind} asset?`)) {
+                          void deleteMediaAsset(asset.id);
+                        }
+                      }}
+                      className="col-span-2 inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-rose-500/15"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
               </div>
-            ) : (
-              <p className="line-clamp-2 text-[10px] leading-5 text-stone-200">{asset.prompt}</p>
-            )}
-
-            <label className="block space-y-1.5 text-[10px] text-stone-400">
-              <span className="uppercase tracking-[0.2em]">Category</span>
-              <select
-                value={asset.categoryId ?? ""}
-                onChange={(event) => void moveMediaAssetToCategory(asset.id, event.target.value || undefined)}
-                className="w-full rounded-xl border border-white/8 bg-black/35 px-3 py-2 font-['IBM_Plex_Mono'] text-[10px] text-stone-100 outline-none transition focus:border-sky-300/35"
-              >
-                <option value="">Unsorted</option>
-                {mediaCategories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  if (src) {
-                    chrome?.openBrowserPreview(buildAssetPreviewDocument(asset, src));
-                    onShowBrowser();
-                  }
-                }}
-                className="inline-flex items-center justify-center gap-1 rounded-lg border border-sky-300/18 bg-sky-300/10 px-2 py-1.5 text-[10px] text-sky-100 transition hover:bg-sky-300/16"
-              >
-                <Eye className="h-3 w-3" />
-                Preview
-              </button>
-              <button
-                type="button"
-                onClick={() => chrome?.openEditorAsset(asset)}
-                className="inline-flex items-center justify-center gap-1 rounded-lg border border-amber-300/18 bg-amber-300/10 px-2 py-1.5 text-[10px] text-amber-50 transition hover:bg-amber-300/16"
-              >
-                <Video className="h-3 w-3" />
-                Editor
-              </button>
-              <button
-                type="button"
-                onClick={handleDownload}
-                className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-white/10"
-              >
-                <Download className="h-3 w-3" />
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleCopy()}
-                className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-white/10"
-              >
-                <Copy className="h-3 w-3" />
-                Path
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (window.confirm(`Delete this ${asset.kind} asset?`)) {
-                    void deleteMediaAsset(asset.id);
-                  }
-                }}
-                className="col-span-2 inline-flex items-center justify-center gap-1 rounded-lg border border-white/8 bg-white/5 px-2 py-1.5 text-[10px] text-stone-300 transition hover:bg-rose-500/15"
-              >
-                <Trash2 className="h-3 w-3" />
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </article>
   );
 }
@@ -2298,14 +2334,12 @@ function VoiceAudioPage({ onShowBrowser }: { onShowBrowser: () => void }) {
           JSON.stringify({
             type: "session.update",
             session: {
-              model: realtimeModel,
+              modalities: ["text", "audio"],
               instructions: realtimeInstructions,
               voice: normalizeVoiceId(voiceName),
               turn_detection: { type: "server_vad" },
-              audio: {
-                input: { format: { type: "audio/pcm", rate: REALTIME_AUDIO_RATE } },
-                output: { format: { type: "audio/pcm", rate: REALTIME_AUDIO_RATE } },
-              },
+              input_audio_format: "pcm16",
+              output_audio_format: "pcm16",
             },
           }),
         );
@@ -2408,12 +2442,20 @@ function VoiceAudioPage({ onShowBrowser }: { onShowBrowser: () => void }) {
       };
 
       socket.onerror = () => {
-        setRealtimeStatus("Realtime websocket error");
+        setRealtimeStatus("WebSocket error — check API key and network");
       };
 
-      socket.onclose = () => {
+      socket.onclose = (closeEvent) => {
         setVoiceActive(false);
-        setRealtimeStatus("Idle");
+        if (closeEvent.code !== 1000) {
+          setRealtimeStatus(
+            closeEvent.reason
+              ? `Disconnected: ${closeEvent.reason} (${closeEvent.code})`
+              : `Disconnected (code ${closeEvent.code})`,
+          );
+        } else {
+          setRealtimeStatus("Idle");
+        }
       };
     } catch (error) {
       setVoiceActive(false);
@@ -3016,6 +3058,16 @@ function IdePage({ onShowBrowser }: { onShowBrowser: () => void }) {
     await refreshWorkspaceAfterMutation(activeWorkspaceId, nextActivePath);
   };
 
+  const writeTerminalData = useAppStore((state) => state.writeTerminalData);
+
+  const handleOpenInTerminal = async (node: IdeTreeNode) => {
+    if (node.kind !== "folder") {
+      return;
+    }
+    const escapedPath = node.path.replace(/'/g, "'\\''");
+    await writeTerminalData(`cd '${escapedPath}'\n`);
+  };
+
   const sendAssistantMessage = async () => {
     const trimmed = assistantComposer.trim();
     if (!trimmed || assistantSending) {
@@ -3511,17 +3563,30 @@ function IdePage({ onShowBrowser }: { onShowBrowser: () => void }) {
           onPointerDown={(event) => event.stopPropagation()}
         >
           {contextMenu.node.kind === "folder" ? (
-            <button
-              type="button"
-              onClick={() => {
-                setContextMenu(undefined);
-                void handleCreateFile(contextMenu.node);
-              }}
-              className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
-            >
-              <Code2 className="h-3.5 w-3.5" />
-              New File
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(undefined);
+                  void handleCreateFile(contextMenu.node);
+                }}
+                className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+              >
+                <Code2 className="h-3.5 w-3.5" />
+                New File
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(undefined);
+                  void handleOpenInTerminal(contextMenu.node);
+                }}
+                className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[11px] text-stone-200 transition hover:bg-white/7"
+              >
+                <SquareTerminal className="h-3.5 w-3.5" />
+                Open in Terminal
+              </button>
+            </>
           ) : null}
           {contextMenu.node.kind === "file" ? (
             <button
