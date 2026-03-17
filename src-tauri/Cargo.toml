@@ -1,6 +1,6 @@
 [package]
 name = "grok-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Grok Desktop AI widget"
 license = "MIT"
 authors = ["megabrain2"]
