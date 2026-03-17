@@ -35,6 +35,14 @@ impl ProviderService {
         Self { client, secrets }
     }
 
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    pub fn require_api_key_public(&self) -> AppResult<String> {
+        self.require_api_key()
+    }
+
     pub fn has_key(&self, provider: ProviderId) -> AppResult<bool> {
         self.secrets.has_api_key(provider)
     }
@@ -505,7 +513,7 @@ fn find_video_url(json: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn base_system_prompt(workspace_context: &str) -> String {
+pub fn base_system_prompt(workspace_context: &str) -> String {
     if workspace_context.trim().is_empty() {
         return "You are Grok Desktop, a concise desktop coding assistant. Respond clearly and use Markdown for code.".into();
     }

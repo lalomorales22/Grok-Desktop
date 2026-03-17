@@ -1,3 +1,4 @@
+mod agent;
 mod db;
 mod editor;
 mod error;
@@ -5,6 +6,7 @@ mod hands;
 mod keychain;
 mod providers;
 mod terminal;
+mod tools;
 mod types;
 mod window;
 mod workspace;
@@ -24,7 +26,7 @@ use terminal::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use types::{
-    ChatRequest, Conversation, ConversationDetail, ConversationSummary,
+    AgentChatRequest, ChatRequest, Conversation, ConversationDetail, ConversationSummary,
     ExportEditorTimelineRequest, GenerateImageRequest, GenerateVideoRequest, HandsStatus,
     ImportLocalMediaRequest, MediaAsset, MediaCategory, ModelDescriptor, NewConversation,
     NewMediaCategory, NewWorkspace, ProviderId, ProviderStatus, RealtimeSession,
@@ -283,7 +285,11 @@ fn list_workspace_items(
 }
 
 #[tauri::command]
-fn read_workspace_text_file(file_path: String) -> Result<String, String> {
+fn read_workspace_text_file(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<String, String> {
+    validate_workspace_file_path(&state, &file_path)?;
     std::fs::read_to_string(&file_path).map_err(to_command_error)
 }
 
@@ -293,6 +299,7 @@ fn write_workspace_text_file(
     file_path: String,
     content: String,
 ) -> Result<(), String> {
+    validate_workspace_file_path(&state, &file_path)?;
     std::fs::write(&file_path, &content).map_err(to_command_error)?;
     state
         .db
@@ -301,17 +308,24 @@ fn write_workspace_text_file(
 }
 
 #[tauri::command]
-fn create_workspace_text_file(file_path: String, content: String) -> Result<(), String> {
+fn create_workspace_text_file(
+    state: State<'_, AppState>,
+    file_path: String,
+    content: String,
+) -> Result<(), String> {
+    validate_workspace_file_path(&state, &file_path)?;
     create_workspace_fs_text_file(&file_path, &content).map_err(to_command_error)
 }
 
 #[tauri::command]
-fn rename_workspace_path(path: String, new_name: String) -> Result<(), String> {
+fn rename_workspace_path(state: State<'_, AppState>, path: String, new_name: String) -> Result<(), String> {
+    validate_workspace_file_path(&state, &path)?;
     rename_workspace_fs_path(&path, &new_name).map_err(to_command_error)
 }
 
 #[tauri::command]
-fn delete_workspace_path(path: String) -> Result<(), String> {
+fn delete_workspace_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    validate_workspace_file_path(&state, &path)?;
     delete_workspace_fs_path(&path).map_err(to_command_error)
 }
 
@@ -673,6 +687,247 @@ fn cancel_stream(state: State<'_, AppState>, stream_id: String) -> Result<(), St
 }
 
 #[tauri::command]
+async fn send_agent_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AgentChatRequest,
+) -> Result<StreamHandle, String> {
+    let trimmed = input.user_text.trim();
+    if trimmed.is_empty() {
+        return Err("Message cannot be empty.".into());
+    }
+
+    let selected_items = state
+        .db
+        .fetch_workspace_items_by_ids(&input.selected_workspace_items)
+        .map_err(to_command_error)?;
+    let workspace_context = build_context_prompt(&selected_items).map_err(to_command_error)?;
+
+    let user_message = state
+        .db
+        .insert_message(
+            &input.conversation_id,
+            types::MessageRole::User,
+            trimmed,
+            "complete",
+            Some(input.provider_id),
+            Some(&input.model_id),
+        )
+        .map_err(to_command_error)?;
+    state
+        .db
+        .save_message_context(&user_message.id, &input.selected_workspace_items)
+        .map_err(to_command_error)?;
+    let assistant_message = state
+        .db
+        .insert_message(
+            &input.conversation_id,
+            types::MessageRole::Assistant,
+            "",
+            "streaming",
+            Some(input.provider_id),
+            Some(&input.model_id),
+        )
+        .map_err(to_command_error)?;
+    let history = state
+        .db
+        .build_chat_history(&ChatRequest {
+            conversation_id: input.conversation_id.clone(),
+            provider_id: input.provider_id,
+            model_id: input.model_id.clone(),
+            user_text: trimmed.to_string(),
+            selected_workspace_items: input.selected_workspace_items.clone(),
+            temperature: input.temperature,
+            max_output_tokens: input.max_output_tokens,
+        })
+        .map_err(to_command_error)?;
+
+    let stream_id = uuid::Uuid::new_v4().to_string();
+    let handle = StreamHandle {
+        stream_id: stream_id.clone(),
+        message_id: assistant_message.id.clone(),
+    };
+    let cancel = CancellationToken::new();
+    state
+        .streams
+        .lock()
+        .map_err(|_| "stream registry lock poisoned".to_string())?
+        .insert(stream_id.clone(), cancel.clone());
+
+    // Collect workspace roots for the agent
+    let workspaces = state.db.list_workspaces().map_err(to_command_error)?;
+    let workspace_roots: Vec<String> = workspaces
+        .iter()
+        .flat_map(|w| w.roots.clone())
+        .collect();
+
+    let db = state.db.clone();
+    let providers = state.providers.clone();
+    let api_key = providers.require_api_key_public().map_err(to_command_error)?;
+
+    tauri::async_runtime::spawn(async move {
+        let emit_started = app.emit(
+            "chat://stream",
+            StreamEvent {
+                stream_id: stream_id.clone(),
+                kind: "started".into(),
+                text_delta: None,
+                message_id: assistant_message.id.clone(),
+                usage: None,
+                error: None,
+            },
+        );
+        if let Err(e) = emit_started {
+            error!("failed to emit stream start: {e}");
+        }
+
+        // Emit agent events through a separate event channel
+        let app_ref = app.clone();
+        let stream_id_ref = stream_id.clone();
+        let msg_id_ref = assistant_message.id.clone();
+
+        // Build OpenAI-format history
+        let mut openai_messages: Vec<serde_json::Value> = Vec::new();
+        for msg in &history {
+            if msg.role == "system" {
+                continue;
+            }
+            openai_messages.push(serde_json::json!({
+                "role": if msg.role == "assistant" { "assistant" } else { "user" },
+                "content": msg.content,
+            }));
+        }
+
+        let system_prompt = providers::base_system_prompt(&workspace_context);
+
+        let agent_config = agent::AgentConfig {
+            model_id: input.model_id.clone(),
+            system_prompt,
+            max_iterations: input.max_iterations.unwrap_or(25) as usize,
+            workspace_roots: workspace_roots.clone(),
+        };
+        let tool_registry = tools::ToolRegistry::new(workspace_roots);
+
+        let result = agent::run_agent(
+            providers.client(),
+            &api_key,
+            &agent_config,
+            openai_messages,
+            &tool_registry,
+            cancel.clone(),
+            |event| {
+                // Forward agent events to frontend
+                let _ = app_ref.emit("agent://event", serde_json::json!({
+                    "streamId": &stream_id_ref,
+                    "messageId": &msg_id_ref,
+                    "event": event,
+                }));
+                // Also emit text deltas through the regular stream channel
+                if let agent::AgentEvent::TextDelta { ref text } = event {
+                    let _ = app_ref.emit(
+                        "chat://stream",
+                        StreamEvent {
+                            stream_id: stream_id_ref.clone(),
+                            kind: "delta".into(),
+                            text_delta: Some(text.clone()),
+                            message_id: msg_id_ref.clone(),
+                            usage: None,
+                            error: None,
+                        },
+                    );
+                }
+                Ok(())
+            },
+        )
+        .await;
+
+        match result {
+            Ok(agent_result) => {
+                let usage = agent_result.usage;
+                if let Err(e) = db.finalize_message(
+                    &assistant_message.id,
+                    &agent_result.final_text,
+                    "complete",
+                    Some(usage.clone()),
+                    None,
+                ) {
+                    error!("failed to finalize agent message: {e}");
+                }
+                // Store tool call records as metadata
+                if !agent_result.tool_calls_made.is_empty() {
+                    if let Ok(json) = serde_json::to_string(&agent_result.tool_calls_made) {
+                        let _ = db.save_message_tool_calls(&assistant_message.id, &json);
+                    }
+                }
+                let _ = app.emit(
+                    "chat://stream",
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        kind: "completed".into(),
+                        text_delta: None,
+                        message_id: assistant_message.id.clone(),
+                        usage: Some(usage),
+                        error: None,
+                    },
+                );
+            }
+            Err(e) if e.to_string() == "cancelled" => {
+                let _ = db.finalize_message(
+                    &assistant_message.id,
+                    "",
+                    "cancelled",
+                    None,
+                    None,
+                );
+                let _ = app.emit(
+                    "chat://stream",
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        kind: "cancelled".into(),
+                        text_delta: None,
+                        message_id: assistant_message.id.clone(),
+                        usage: None,
+                        error: None,
+                    },
+                );
+            }
+            Err(e) => {
+                let message = e.to_string();
+                let _ = db.finalize_message(
+                    &assistant_message.id,
+                    "",
+                    "error",
+                    None,
+                    Some(message.clone()),
+                );
+                let _ = app.emit(
+                    "chat://stream",
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        kind: "error".into(),
+                        text_delta: None,
+                        message_id: assistant_message.id.clone(),
+                        usage: None,
+                        error: Some(message),
+                    },
+                );
+            }
+        }
+
+        if let Ok(mut registry) = app
+            .state::<AppState>()
+            .streams
+            .lock()
+            .map_err(|_| AppError::message("stream registry lock poisoned"))
+        {
+            registry.remove(&stream_id);
+        }
+    });
+
+    Ok(handle)
+}
+
+#[tauri::command]
 async fn start_terminal(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -735,6 +990,46 @@ async fn start_hands_service(
 async fn stop_hands_service(state: State<'_, AppState>) -> Result<HandsStatus, String> {
     let settings = state.db.load_settings().map_err(to_command_error)?;
     Ok(state.hands.stop(&settings).await)
+}
+
+fn validate_workspace_file_path(state: &AppState, file_path: &str) -> Result<(), String> {
+    let workspaces = state.db.list_workspaces().map_err(to_command_error)?;
+    let target = std::path::PathBuf::from(file_path);
+    // Allow both existing and not-yet-existing paths by canonicalizing the parent
+    let canonical = if target.exists() {
+        target
+            .canonicalize()
+            .map_err(|e| format!("path resolution failed: {e}"))?
+    } else {
+        let parent = target
+            .parent()
+            .ok_or_else(|| "invalid file path".to_string())?;
+        if parent.exists() {
+            let mut resolved = parent
+                .canonicalize()
+                .map_err(|e| format!("path resolution failed: {e}"))?;
+            if let Some(name) = target.file_name() {
+                resolved.push(name);
+            }
+            resolved
+        } else {
+            target.clone()
+        }
+    };
+    for workspace in &workspaces {
+        for root in &workspace.roots {
+            let root_path = std::path::PathBuf::from(root);
+            let canonical_root = if root_path.exists() {
+                root_path.canonicalize().unwrap_or_else(|_| root_path.clone())
+            } else {
+                root_path
+            };
+            if canonical.starts_with(&canonical_root) {
+                return Ok(());
+            }
+        }
+    }
+    Err("file path is outside all workspace roots".into())
 }
 
 fn to_command_error(error: impl std::fmt::Display) -> String {
@@ -996,6 +1291,7 @@ pub fn run() {
             set_conversation_pinned,
             delete_conversation,
             send_message,
+            send_agent_message,
             cancel_stream,
             start_terminal,
             write_terminal_input,
